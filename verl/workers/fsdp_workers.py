@@ -116,7 +116,10 @@ class ActorRolloutRefWorker(Worker):
 
         # normalize config
         if self._is_actor:
-            self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
+            # Trajectories are expanded by n_repeat in the trainer.  rollout.n
+            # is the deprecated vLLM parallel-sampling knob and must remain 1
+            # for the multi-turn manager to preserve one output per active row.
+            self.config.actor.ppo_mini_batch_size *= self.config.rollout.n_repeat
             self.config.actor.ppo_mini_batch_size //= (self.device_mesh.shape[0] // self.ulysses_sequence_parallel_size)
             # micro bsz
             if self.config.actor.ppo_micro_batch_size is not None:
@@ -274,7 +277,8 @@ class ActorRolloutRefWorker(Worker):
             actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
                                           lr=optim_config.lr,
                                           betas=optim_config.get('betas', (0.9, 0.999)),
-                                          weight_decay=optim_config.get('weight_decay', 1e-2))
+                                          weight_decay=optim_config.get('weight_decay', 1e-2),
+                                          foreach=optim_config.get('foreach', None))
 
             total_steps = optim_config.get('total_training_steps', 0)
             num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
@@ -331,7 +335,15 @@ class ActorRolloutRefWorker(Worker):
                                                                inference_engine=rollout.inference_engine,
                                                                model_config=self.actor_model_config,
                                                                full_params='hf' in self.config.rollout.load_format,
-                                                               device_mesh=rollout_device_mesh)
+                                                               device_mesh=rollout_device_mesh,
+                                                               sleep_level=self.config.rollout.get('sleep_level', 1))
+            # Standard vLLM starts with its model weights resident.  The first
+            # sharding-manager entry must materialize an FSDP state dict before
+            # synchronizing those weights, which otherwise creates an avoidable
+            # first-step memory peak.  Match the steady-state exit path by
+            # putting vLLM to sleep once immediately after construction.
+            if self.config.rollout.get('free_cache_engine', False) and vllm_mode == 'spmd':
+                rollout.inference_engine.sleep(level=self.config.rollout.get('sleep_level', 1))
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         return rollout, rollout_sharding_manager
@@ -580,7 +592,6 @@ class ActorRolloutRefWorker(Worker):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         self.checkpoint_manager.load_checkpoint(path=path, del_local_after_load=del_local_after_load)
-
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 

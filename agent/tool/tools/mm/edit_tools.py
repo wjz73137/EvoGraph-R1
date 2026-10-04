@@ -15,6 +15,7 @@ import requests
 from agent.tool.tool_base import Tool
 from agent.tool.tools.batch.unified_batch_queue import BatchTask
 from agent.tool.tools.edit_result_contract import build_edit_task_response
+from agent.tool.tools.mm.commit_gate import validate_graph_edit_commit
 from agent.tool.tools.update_types import UpdateType
 
 
@@ -56,13 +57,21 @@ class _MMEditTool(Tool):
                 }
             )
 
+        gate_failure = self._gate_failure(args)
+        if gate_failure is not None:
+            return json.dumps(gate_failure, ensure_ascii=False)
+
         payload = {
             key: value
             for key, value in args.items()
             if key in self.parameters.get("properties", {})
         }
         try:
-            data = self._post_json(self.endpoint_path, payload)
+            data = self._post_json(
+                self.endpoint_path,
+                payload,
+                api_base_url=args.get("__mm_api_url"),
+            )
             if isinstance(data, dict):
                 return json.dumps(data, ensure_ascii=False)
             return json.dumps(
@@ -82,6 +91,14 @@ class _MMEditTool(Tool):
             )
 
     def batch_execute(self, args_list: list[Dict]) -> list[str]:
+        routed_urls = {
+            str(args.get("__mm_api_url", "")).strip()
+            for args in args_list
+            if str(args.get("__mm_api_url", "")).strip()
+        }
+        if len(routed_urls) > 1:
+            return [self.execute(args) for args in args_list]
+
         results: list[dict[str, Any] | None] = [None] * len(args_list)
         payload_items: list[dict[str, Any]] = []
         payload_positions: list[int] = []
@@ -90,6 +107,10 @@ class _MMEditTool(Tool):
             is_valid, error_msg = self.validate_args(args)
             if not is_valid:
                 results[index] = self._validation_error(error_msg)
+                continue
+            gate_failure = self._gate_failure(args)
+            if gate_failure is not None:
+                results[index] = gate_failure
                 continue
             payload_positions.append(index)
             payload = self._filter_payload(args)
@@ -103,7 +124,11 @@ class _MMEditTool(Tool):
         if not payload_items:
             return [json.dumps(item, ensure_ascii=False) for item in results if item is not None]
         try:
-            data = self._post_json(self.batch_endpoint_path, {"items": payload_items})
+            data = self._post_json(
+                self.batch_endpoint_path,
+                {"items": payload_items},
+                api_base_url=next(iter(routed_urls), None),
+            )
         except Exception as exc:
             failure = {"success": False, "message": str(exc), "blockers": [str(exc)]}
             for offset, position in enumerate(payload_positions):
@@ -141,6 +166,9 @@ class _MMEditTool(Tool):
                 self._validation_error(error_msg),
                 ensure_ascii=False,
             )
+        gate_failure = self._gate_failure(args)
+        if gate_failure is not None:
+            return json.dumps(gate_failure, ensure_ascii=False)
         payload = self._filter_payload(args)
         task = self._new_batch_task(
             payload,
@@ -253,9 +281,15 @@ class _MMEditTool(Tool):
                 "max_batch_size": self.max_batch_size,
             }
 
-    def _post_json(self, endpoint_path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_json(
+        self,
+        endpoint_path: str,
+        payload: Dict[str, Any],
+        *,
+        api_base_url: str | None = None,
+    ) -> Dict[str, Any]:
         response = requests.post(
-            self._endpoint_url(endpoint_path),
+            self._endpoint_url(endpoint_path, api_base_url=api_base_url),
             json=payload,
             timeout=self.timeout,
         )
@@ -268,8 +302,13 @@ class _MMEditTool(Tool):
         data = response.json()
         return data if isinstance(data, dict) else {}
 
-    def _endpoint_url(self, endpoint_path: str | None = None) -> str:
-        parsed = urlsplit(self.search_api_url)
+    def _endpoint_url(
+        self,
+        endpoint_path: str | None = None,
+        *,
+        api_base_url: str | None = None,
+    ) -> str:
+        parsed = urlsplit(api_base_url or self.search_api_url)
         base_path = parsed.path.rsplit("/", 1)[0] if parsed.path else ""
         path = endpoint_path if endpoint_path is not None else self.endpoint_path
         endpoint = f"{base_path}/{path.lstrip('/')}"
@@ -370,6 +409,23 @@ class _MMEditTool(Tool):
             key: value
             for key, value in args.items()
             if key in self.parameters.get("properties", {})
+        }
+
+    def _gate_failure(self, args: Dict) -> dict[str, Any] | None:
+        operation = self.update_type.value if self.update_type is not None else self.name
+        decision = validate_graph_edit_commit(operation, args)
+        if decision.allowed:
+            return None
+        gate = decision.to_dict()
+        message = (
+            "Graph edit rejected by pre-commit evidence gate: "
+            f"{gate['reason']}"
+        )
+        return {
+            "success": False,
+            "message": message,
+            "blockers": [gate["conflict_type"], gate["validity"]],
+            "precommit_gate": gate,
         }
 
     def _new_batch_task(

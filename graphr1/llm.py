@@ -584,8 +584,13 @@ async def gpt_4o_mini_complete(
     keyword_extraction = kwargs.pop("keyword_extraction", None)
     if keyword_extraction:
         kwargs["response_format"] = GPTKeywordExtractionFormat
+    model = (
+        os.getenv("GRAPH_LLM_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    )
     return await openai_complete_if_cache(
-        "gpt-4o-mini",
+        model,
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,

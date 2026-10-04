@@ -72,6 +72,11 @@ MUTABLE_FILES = (
     "hyperedge_content_lookup.json",
     "hyperedge_recent_mutations.json",
     "mm_store/graph/graphr1_hit_source_sidecar.json",
+    "mm_store/bge_graph/index_entity.bin",
+    "mm_store/bge_graph/corpus_entity.npy",
+    "mm_store/bge_graph/index_hyperedge.bin",
+    "mm_store/bge_graph/corpus_hyperedge.npy",
+    "mm_store/bge_graph/metadata.json",
 )
 
 
@@ -303,6 +308,100 @@ def apply_hyperedge_soft_delete(
     return {"ids": [hyperedge_id], "deleted_id": hyperedge_id}
 
 
+def apply_controlled_hyperedge_hide(
+    *,
+    working_dir: str | Path,
+    target_id: str,
+    perturbation_id: str,
+    reason: str = "controlled_missing_fact",
+) -> dict[str, Any]:
+    """Hide one fact from retrieval in an isolated experimental KB copy.
+
+    This is deliberately separate from the paper's soft-delete operation.  It
+    leaves the graph record intact for provenance and restoration, but excludes
+    it from every text retrieval index through an explicit ``searchable=False``
+    marker.
+    """
+    working_path = Path(working_dir)
+    hyperedges = _read_json_object(working_path / "kv_store_hyperedges.json")
+    hyperedge = hyperedges.get(target_id)
+    if not isinstance(hyperedge, dict):
+        raise ValueError(f"Unknown controlled perturbation target: {target_id}")
+    if hyperedge.get("searchable", True) is False:
+        raise ValueError(f"Hyperedge is already hidden from retrieval: {target_id}")
+
+    updated = deepcopy(hyperedge)
+    content = str(updated.get("content") or updated.get("hyperedge_name") or "").strip()
+    if not content:
+        raise ValueError(f"Hyperedge has no searchable content: {target_id}")
+    updated["searchable"] = False
+    updated["controlled_perturbation"] = {
+        "id": perturbation_id,
+        "type": reason,
+        "applied_at": datetime.now(timezone.utc).isoformat(),
+        "original_searchable": bool(hyperedge.get("searchable", True)),
+    }
+    hyperedges[target_id] = updated
+    _persist_hyperedge_changes(
+        working_path,
+        None,
+        hyperedges,
+        [
+            {
+                "hyperedge_id": target_id,
+                "action": "controlled_hide",
+                "content": content,
+                "active": False,
+                "searchable": False,
+            }
+        ],
+    )
+    return {
+        "ids": [target_id],
+        "hidden_id": target_id,
+        "content": content,
+        "perturbation_id": perturbation_id,
+    }
+
+
+def rebuild_root_text_indexes(
+    *,
+    working_dir: str | Path,
+    include_entities: bool = False,
+    include_hyperedges: bool = True,
+    model_path: str | Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Rebuild root FAISS sidecars while reusing every unchanged embedding."""
+    working_path = Path(working_dir)
+    results: dict[str, dict[str, Any]] = {}
+    resolved_model_path = Path(model_path) if model_path is not None else None
+    if include_entities:
+        results["entity"] = _rebuild_incremental_root_index(
+            output_dir=working_path,
+            namespace="entity",
+            records=_load_entity_records(working_path / "kv_store_entities.json"),
+            encoder=None,
+            corpus_file="corpus_entity.npy",
+            index_file="index_entity.bin",
+            metadata_file="entity_index_metadata.json",
+            model_path=resolved_model_path,
+        )
+    if include_hyperedges:
+        results["hyperedge"] = _rebuild_incremental_root_index(
+            output_dir=working_path,
+            namespace="hyperedge",
+            records=_load_searchable_hyperedge_records(
+                working_path / "kv_store_hyperedges.json"
+            ),
+            encoder=None,
+            corpus_file="corpus_hyperedge.npy",
+            index_file="index_hyperedge.bin",
+            metadata_file="hyperedge_index_metadata.json",
+            model_path=resolved_model_path,
+        )
+    return results
+
+
 def rebuild_graph_text_indexes(
     *,
     working_dir: str | Path,
@@ -310,6 +409,8 @@ def rebuild_graph_text_indexes(
     model_path: str | Path | None = None,
     include_entities: bool = True,
     include_hyperedges: bool = True,
+    previous_hyperedges: dict[str, Any] | None = None,
+    previous_state: dict[str, list[str]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     del encoder, model_path
     working_path = Path(working_dir)
@@ -319,21 +420,37 @@ def rebuild_graph_text_indexes(
     metadata = _read_bge_graph_metadata(graph_dir / "metadata.json")
     results: dict[str, dict[str, Any]] = {}
     if include_entities:
+        previous_entity_texts = (
+            previous_state.get("entity_embedding_texts")
+            if previous_state is not None
+            else None
+        )
         results["entity"] = _write_bge_graph_index(
             graph_dir=graph_dir,
             namespace="entity",
             texts=entity_embedding_texts,
             corpus=entity_corpus,
+            previous_texts=previous_entity_texts,
         )
         metadata["entity_count"] = len(entity_corpus)
     else:
         metadata.setdefault("entity_count", len(entity_corpus))
     if include_hyperedges:
+        previous_hyperedge_corpus = (
+            previous_state.get("hyperedge_corpus")
+            if previous_state is not None
+            else (
+                _active_hyperedge_contents(previous_hyperedges)
+                if previous_hyperedges is not None
+                else None
+            )
+        )
         results["hyperedge"] = _write_bge_graph_index(
             graph_dir=graph_dir,
             namespace="hyperedge",
             texts=hyperedge_corpus,
             corpus=hyperedge_corpus,
+            previous_texts=previous_hyperedge_corpus,
         )
         metadata["hyperedge_count"] = len(hyperedge_corpus)
     else:
@@ -353,6 +470,20 @@ def rebuild_graph_text_indexes(
     return results
 
 
+def capture_graph_text_index_state(
+    working_dir: str | Path,
+) -> dict[str, list[str]]:
+    """Capture the corpus order needed to reuse BGE vectors after an edit."""
+    entity_corpus, entity_embedding_texts, hyperedge_corpus = _bge_graph_corpora(
+        Path(working_dir)
+    )
+    return {
+        "entity_corpus": entity_corpus,
+        "entity_embedding_texts": entity_embedding_texts,
+        "hyperedge_corpus": hyperedge_corpus,
+    }
+
+
 def _bge_graph_corpora(working_path: Path) -> tuple[list[str], list[str], list[str]]:
     entities = _read_json_object(working_path / "kv_store_entities.json")
     hyperedges = _read_json_object(working_path / "kv_store_hyperedges.json")
@@ -369,15 +500,25 @@ def _bge_graph_corpora(working_path: Path) -> tuple[list[str], list[str], list[s
                 entity_embedding_texts.append(
                     content if isinstance(content, str) and content.strip() else entity_name
                 )
-    hyperedge_corpus = []
-    if isinstance(hyperedges, dict):
-        for hyperedge in hyperedges.values():
-            if not isinstance(hyperedge, dict) or hyperedge.get("deleted", False):
-                continue
-            content = hyperedge.get("content") or hyperedge.get("hyperedge_name")
-            if isinstance(content, str) and content.strip():
-                hyperedge_corpus.append(content)
+    hyperedge_corpus = _active_hyperedge_contents(hyperedges)
     return entity_corpus, entity_embedding_texts, hyperedge_corpus
+
+
+def _active_hyperedge_contents(hyperedges: dict[str, Any]) -> list[str]:
+    contents = []
+    if not isinstance(hyperedges, dict):
+        return contents
+    for hyperedge in hyperedges.values():
+        if (
+            not isinstance(hyperedge, dict)
+            or hyperedge.get("deleted", False)
+            or hyperedge.get("searchable", True) is False
+        ):
+            continue
+        content = hyperedge.get("content") or hyperedge.get("hyperedge_name")
+        if isinstance(content, str) and content.strip():
+            contents.append(content)
+    return contents
 
 
 def _write_bge_graph_index(
@@ -386,11 +527,39 @@ def _write_bge_graph_index(
     namespace: str,
     texts: list[str],
     corpus: list[str],
+    previous_texts: list[str] | None = None,
 ) -> dict[str, Any]:
     import faiss
     from agent.tool.tools.bge_model_manager import encode_texts_safe
 
-    vectors = _encode_bge_texts(texts, encode_texts_safe)
+    old_corpus_path = graph_dir / f"corpus_{namespace}.npy"
+    reusable: dict[str, list[np.ndarray]] = {}
+    if previous_texts is not None and old_corpus_path.is_file():
+        old_vectors = np.load(old_corpus_path)
+        if old_vectors.ndim == 2 and old_vectors.shape[0] == len(previous_texts):
+            for text, vector in zip(previous_texts, old_vectors):
+                reusable.setdefault(text, []).append(np.asarray(vector, dtype=np.float32))
+
+    rows: list[np.ndarray | None] = []
+    missing_texts = []
+    for text in texts:
+        candidates = reusable.get(text)
+        if candidates:
+            rows.append(candidates.pop(0))
+        else:
+            rows.append(None)
+            missing_texts.append(text)
+    new_vectors = _encode_bge_texts(missing_texts, encode_texts_safe)
+    new_index = 0
+    for row_index, row in enumerate(rows):
+        if row is None:
+            rows[row_index] = new_vectors[new_index]
+            new_index += 1
+    vectors = (
+        np.ascontiguousarray(np.vstack(rows), dtype=np.float32)
+        if rows
+        else np.zeros((0, DEFAULT_BGE_TEXT_DIMENSION), dtype=np.float32)
+    )
     index = faiss.index_factory(
         DEFAULT_BGE_TEXT_DIMENSION,
         "Flat",
@@ -399,7 +568,7 @@ def _write_bge_graph_index(
     if vectors.shape[0] > 0:
         index.add(vectors)
     index_path = graph_dir / f"index_{namespace}.bin"
-    corpus_path = graph_dir / f"corpus_{namespace}.npy"
+    corpus_path = old_corpus_path
     faiss.write_index(index, str(index_path))
     np.save(corpus_path, vectors)
     return {
@@ -409,7 +578,7 @@ def _write_bge_graph_index(
         "embedding_dimension": DEFAULT_BGE_TEXT_DIMENSION,
         "index_path": str(index_path),
         "corpus_path": str(corpus_path),
-        "new_embeddings": len(corpus),
+        "new_embeddings": len(missing_texts),
     }
 
 
@@ -511,6 +680,8 @@ def _load_entity_records(path: Path) -> list[dict[str, Any]]:
     for key, value in data.items():
         if not isinstance(value, dict):
             continue
+        if value.get("searchable", True) is False:
+            continue
         entity_id = str(value.get("entity_name") or key)
         content = str(value.get("content") or entity_id).strip()
         if content:
@@ -525,6 +696,8 @@ def _load_searchable_hyperedge_records(path: Path) -> list[dict[str, Any]]:
     records = []
     for key, value in data.items():
         if not isinstance(value, dict):
+            continue
+        if value.get("searchable", True) is False:
             continue
         content = _hyperedge_embedding_content(
             value.get("content") or value.get("hyperedge_name") or ""
@@ -739,8 +912,14 @@ def _copy_ignore(directory: str, names: list[str]) -> set[str]:
 def _rewrite_metadata_for_edit_copy(target: Path, base_path: Path) -> None:
     metadata_path = target / "metadata.json"
     metadata = _read_json_object(metadata_path) if metadata_path.is_file() else {}
+    original_base = base_path
+    inherited_base = metadata.get("base_output_dir")
+    if metadata.get("graph_edit_copy") is True and isinstance(inherited_base, str):
+        inherited_base = inherited_base.strip()
+        if inherited_base:
+            original_base = Path(inherited_base)
     metadata["output_dir"] = str(target)
-    metadata["base_output_dir"] = str(base_path)
+    metadata["base_output_dir"] = str(original_base)
     metadata["graph_edit_copy"] = True
     metadata["graph_edit_copy_created_at"] = datetime.now(timezone.utc).isoformat()
     _write_json_object(metadata_path, metadata)
@@ -793,6 +972,7 @@ __all__ = [
     "create_edit_checkpoint",
     "ensure_edit_working_dir",
     "prepare_edit_working_dir",
+    "capture_graph_text_index_state",
     "rebuild_graph_text_indexes",
     "restore_edit_checkpoint",
 ]

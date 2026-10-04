@@ -409,6 +409,9 @@ class MMAPIState:
         checkpoint: dict[str, bytes | None] | None = None
         try:
             checkpoint = graph_edit.create_edit_checkpoint(edit_working_dir)
+            previous_index_state = graph_edit.capture_graph_text_index_state(
+                edit_working_dir
+            )
             edit_result = self._run_graph_edit(
                 action,
                 edit_working_dir,
@@ -420,6 +423,7 @@ class MMAPIState:
                 working_dir=edit_working_dir,
                 include_entities=action == "insert",
                 include_hyperedges=True,
+                previous_state=previous_index_state,
             )
             if self.edit_reload_policy == "immediate":
                 self._reload_after_edit(edit_working_dir, checkpoint)
@@ -492,6 +496,9 @@ class MMAPIState:
             any_applied = False
             try:
                 checkpoint = graph_edit.create_edit_checkpoint(edit_working_dir)
+                previous_index_state = graph_edit.capture_graph_text_index_state(
+                    edit_working_dir
+                )
                 if action == "insert":
                     insert_results: list[dict[str, Any] | None] = [None] * len(items)
                     clean_items: list[tuple[int, MMInsertRequest, list[str]]] = []
@@ -589,6 +596,7 @@ class MMAPIState:
                         working_dir=edit_working_dir,
                         include_entities=action == "insert",
                         include_hyperedges=True,
+                        previous_state=previous_index_state,
                     )
                     if self.edit_reload_policy == "immediate":
                         self._reload_after_edit(edit_working_dir, checkpoint)
@@ -657,24 +665,21 @@ class MMAPIState:
         edit_working_dir: Path,
         checkpoint: dict[str, bytes | None],
     ) -> None:
-        next_retriever = MMKBRetriever(
-            working_dir=edit_working_dir,
-            model_path=self.model_path,
-            encoder_factory=self.encoder_factory,
-            rag_factory=self.rag_factory,
-            dataset=self.dataset,
-            subset=self.subset,
-        )
-        reload_status = next_retriever.load()
+        if self.retriever is None:
+            raise RuntimeError("cannot reload an edited MM KB without a retriever")
+        reusable_encoder = self.retriever.encoder
+        reload_status = self.retriever.load(reusable_encoder=reusable_encoder)
         if reload_status.get("status") != "ready":
             graph_edit.restore_edit_checkpoint(edit_working_dir, checkpoint)
+            restored_status = self.retriever.load(reusable_encoder=reusable_encoder)
             blockers = list(reload_status.get("blockers", []))
+            if restored_status.get("status") != "ready":
+                blockers.extend(restored_status.get("blockers", []))
             raise RuntimeError(
                 "GraphR1-native edit applied but edited MM KB reload failed: "
                 + "; ".join(blockers)
             )
         self.working_dir = edit_working_dir
-        self.retriever = next_retriever
         self.last_reload_mtime = self._max_watched_mtime(edit_working_dir)
 
     def _edit_scope_error(self, request: MMEditScope) -> str:

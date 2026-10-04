@@ -596,6 +596,11 @@ class vLLMRollout(BaseRollout):
                 'temperature': 0,
                 'n': 1  # if greedy, only 1 response
             }
+        requested_response_length = int(
+            prompts.meta_info.get('response_length', self.config.response_length)
+        )
+        requested_response_length = max(1, min(requested_response_length, self.config.response_length))
+        kwargs['max_tokens'] = requested_response_length
 
         multi_modal_data = prompts.non_tensor_batch.get('multi_modal_data') if prompts.non_tensor_batch else None
         if multi_modal_data is not None:

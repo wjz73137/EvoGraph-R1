@@ -27,6 +27,35 @@ from verl import DataProto
 from verl.utils.reward_score import _default_compute_score_format, _default_compute_score_answer_f1, _default_compute_score_answer_em, _default_compute_score_format_answer
 import torch
 
+
+def compute_graph_edit_shaping(
+    data_source,
+    *,
+    answer_em_score: float,
+    duplicate_search_count: int,
+    successful_graph_edit_count: int,
+    verified_graph_edit_count: int,
+) -> float:
+    """Small, conservative trajectory shaping for GraphEdit-only datasets.
+
+    A graph edit is rewarded only when it succeeds, is followed by a KB
+    verification query, and the final answer is exactly correct. Repeated
+    identical searches and successful-but-unverified edits are penalized.
+    """
+    if "graph_edit" not in str(data_source).lower():
+        return 0.0
+
+    duplicate_penalty = 0.1 * min(max(int(duplicate_search_count), 0), 5)
+    unverified_edits = max(
+        int(successful_graph_edit_count) - int(verified_graph_edit_count),
+        0,
+    )
+    unverified_penalty = 0.05 * min(unverified_edits, 2)
+    verified_bonus = 0.0
+    if float(answer_em_score) >= 1.0 and int(verified_graph_edit_count) > 0:
+        verified_bonus = 0.15
+    return verified_bonus - duplicate_penalty - unverified_penalty
+
 class RewardManager():
     """The reward manager.
     """
@@ -84,6 +113,18 @@ class RewardManager():
             answer_em_score = _default_compute_score_answer_em(data_source=data_source, solution_str=sequences_str, ground_truth=ground_truth)
             format_score = _default_compute_score_format(data_source=data_source, solution_str=sequences_str)
 
+            def batch_count(key):
+                value = data_item.batch.get(key)
+                return int(value.item()) if value is not None else 0
+
+            score += compute_graph_edit_shaping(
+                data_source,
+                answer_em_score=answer_em_score,
+                duplicate_search_count=batch_count("duplicate_search_count"),
+                successful_graph_edit_count=batch_count("successful_graph_edit_count"),
+                verified_graph_edit_count=batch_count("verified_graph_edit_count"),
+            )
+
             answer_lst_f1.append(answer_f1_score)
             answer_lst_em.append(answer_em_score)
             format_lst.append(format_score)
@@ -119,6 +160,16 @@ def run_ppo(config, compute_score=None):
             os.environ.pop("RAY_ADDRESS", None)
             os.environ.pop("RAY_REDIS_ADDRESS", None)
             init_kwargs["address"] = "local"
+        ray_temp_dir = os.getenv("RAY_TMPDIR", "").strip()
+        if ray_temp_dir:
+            os.makedirs(ray_temp_dir, exist_ok=True)
+            init_kwargs["_temp_dir"] = ray_temp_dir
+        ray_num_cpus = os.getenv("RAY_NUM_CPUS", "").strip()
+        if ray_num_cpus:
+            init_kwargs["num_cpus"] = int(ray_num_cpus)
+        ray_object_store_memory = os.getenv("RAY_OBJECT_STORE_MEMORY_BYTES", "").strip()
+        if ray_object_store_memory:
+            init_kwargs["object_store_memory"] = int(ray_object_store_memory)
         ray.init(**init_kwargs)
 
     ray.get(main_task.remote(config, compute_score))

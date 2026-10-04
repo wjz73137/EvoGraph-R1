@@ -1,0 +1,69 @@
+{
+  "version": "evqa-four-doc-gold-v1",
+  "policy": {
+    "scope": "Only facts explicitly supported by the four pinned source passages.",
+    "atomicity": "Split independently useful claims, but preserve uncertainty and alternatives in one fact when their scope is shared.",
+    "inference": "Do not add external knowledge or calculate unstated dates.",
+    "incomplete_text": "Do not turn the unfinished final inauguration clause into a fact."
+  },
+  "documents": {
+    "Newport Castle": [
+      {"id": "NC01", "fact": "Castell Casnewydd is the Welsh name of Newport Castle.", "evidence": "Newport Castle (Welsh: Castell Casnewydd) is a ruined castle in Newport, Wales."},
+      {"id": "NC02", "fact": "Newport Castle is a ruined castle in Newport, Wales.", "evidence": "Newport Castle (Welsh: Castell Casnewydd) is a ruined castle in Newport, Wales."},
+      {"id": "NC03", "fact": "Newport Castle was built in the 14th century.", "evidence": "It was built in the 14th century, probably by Hugh de Audley, 1st Earl of Gloucester or his son-in-law, Ralph, Earl of Stafford, with the purpose of managing the crossing of the River Usk."},
+      {"id": "NC04", "fact": "Newport Castle was probably built by either Hugh de Audley, 1st Earl of Gloucester, or his son-in-law Ralph, Earl of Stafford.", "evidence": "It was built in the 14th century, probably by Hugh de Audley, 1st Earl of Gloucester or his son-in-law, Ralph, Earl of Stafford, with the purpose of managing the crossing of the River Usk."},
+      {"id": "NC05", "fact": "Newport Castle was built to manage the crossing of the River Usk.", "evidence": "It was built in the 14th century, probably by Hugh de Audley, 1st Earl of Gloucester or his son-in-law, Ralph, Earl of Stafford, with the purpose of managing the crossing of the River Usk."},
+      {"id": "NC06", "fact": "Newport Castle was used as administrative offices for collecting rent and dues from local tenants.", "evidence": "The castle was used as administrative offices for the collection of rent and dues from local tenants, and was also a residence and a garrison."},
+      {"id": "NC07", "fact": "Newport Castle was used as a residence.", "evidence": "The castle was used as administrative offices for the collection of rent and dues from local tenants, and was also a residence and a garrison."},
+      {"id": "NC08", "fact": "Newport Castle was used as a garrison.", "evidence": "The castle was used as administrative offices for the collection of rent and dues from local tenants, and was also a residence and a garrison."},
+      {"id": "NC09", "fact": "Newport Castle was sacked by Owain Glyndŵr in 1402.", "evidence": "In 1402 it was sacked by Owain Glyndŵr."},
+      {"id": "NC10", "fact": "Newport Castle was in disrepair by 1522.", "evidence": "It was in disrepair by 1522, and was taken by Oliver Cromwell's forces during the Civil War."},
+      {"id": "NC11", "fact": "Newport Castle was taken by Oliver Cromwell's forces during the Civil War.", "evidence": "It was in disrepair by 1522, and was taken by Oliver Cromwell's forces during the Civil War."},
+      {"id": "NC12", "fact": "Newport Castle's use declined further in later centuries.", "evidence": "Its use declined further in later centuries."},
+      {"id": "NC13", "fact": "Newport Castle has been a Grade II* Listed building since 1951.", "evidence": "It has been a Grade II* Listed building since 1951."}
+    ],
+    "Charles William Jones House": [
+      {"id": "CJ01", "fact": "The Charles William Jones House is also known as John B. Jones.", "evidence": "The Charles William Jones House (also known as John B. Jones) is a historic home in Pensacola, Florida."},
+      {"id": "CJ02", "fact": "The Charles William Jones House is a historic home in Pensacola, Florida.", "evidence": "The Charles William Jones House (also known as John B. Jones) is a historic home in Pensacola, Florida."},
+      {"id": "CJ03", "fact": "The Charles William Jones House is located at 302 North Barcelona Street.", "evidence": "It is located at 302 North Barcelona Street."},
+      {"id": "CJ04", "fact": "The Charles William Jones House was added to the U.S. National Register of Historic Places on December 20, 1977.", "evidence": "On December 20, 1977, it was added to the U.S. National Register of Historic Places."}
+    ],
+    "Büyük Han": [
+      {"id": "BH01", "fact": "Büyük Han literally means Great Inn.", "evidence": "Büyük Han (lit. Great Inn) (Greek: Μεγάλο Πανδοχείο Megálo Pandocheío) is the largest caravansarai on the island of Cyprus and is considered to be one of the finest buildings on the island."},
+      {"id": "BH02", "fact": "The Greek name given for Büyük Han is Μεγάλο Πανδοχείο (Megálo Pandocheío).", "evidence": "Büyük Han (lit. Great Inn) (Greek: Μεγάλο Πανδοχείο Megálo Pandocheío) is the largest caravansarai on the island of Cyprus and is considered to be one of the finest buildings on the island."},
+      {"id": "BH03", "fact": "Büyük Han is the largest caravansarai on Cyprus.", "evidence": "Büyük Han (lit. Great Inn) (Greek: Μεγάλο Πανδοχείο Megálo Pandocheío) is the largest caravansarai on the island of Cyprus and is considered to be one of the finest buildings on the island."},
+      {"id": "BH04", "fact": "Büyük Han is considered one of the finest buildings on Cyprus.", "evidence": "Büyük Han (lit. Great Inn) (Greek: Μεγάλο Πανδοχείο Megálo Pandocheío) is the largest caravansarai on the island of Cyprus and is considered to be one of the finest buildings on the island."},
+      {"id": "BH05", "fact": "Büyük Han is located in the capital of Cyprus; the passage does not name the capital.", "evidence": "Located in the capital of Cyprus, it was built by the Ottomans in 1572, the year after they had seized Cyprus from the Venetians."},
+      {"id": "BH06", "fact": "Büyük Han was built by the Ottomans in 1572.", "evidence": "Located in the capital of Cyprus, it was built by the Ottomans in 1572, the year after they had seized Cyprus from the Venetians."},
+      {"id": "BH07", "fact": "The Ottomans built Büyük Han the year after they seized Cyprus from the Venetians; the passage does not state the seizure year explicitly.", "evidence": "Located in the capital of Cyprus, it was built by the Ottomans in 1572, the year after they had seized Cyprus from the Venetians."},
+      {"id": "BH08", "fact": "A mosque stands in the centre of Büyük Han's open courtyard.", "evidence": "In the centre of the open courtyard is a mosque with a fountain for pre-prayer ablutions."},
+      {"id": "BH09", "fact": "The courtyard mosque has a fountain for pre-prayer ablutions.", "evidence": "In the centre of the open courtyard is a mosque with a fountain for pre-prayer ablutions."},
+      {"id": "BH10", "fact": "Büyük Han became the first city prison under British administration.", "evidence": "It became the first city prison under British administration."},
+      {"id": "BH11", "fact": "Büyük Han spent most of the 1990s being restored.", "evidence": "After spending most of the 1990s being restored, the inn has been revived as a thriving arts centre, consisting of several galleries and workshops."},
+      {"id": "BH12", "fact": "Büyük Han was revived as a thriving arts centre.", "evidence": "After spending most of the 1990s being restored, the inn has been revived as a thriving arts centre, consisting of several galleries and workshops."},
+      {"id": "BH13", "fact": "Büyük Han's arts centre consists of several galleries and workshops.", "evidence": "After spending most of the 1990s being restored, the inn has been revived as a thriving arts centre, consisting of several galleries and workshops."},
+      {"id": "BH14", "fact": "Büyük Han has several courtyard cafes.", "evidence": "There are also several courtyard cafes and souvenir shops."},
+      {"id": "BH15", "fact": "Büyük Han has souvenir shops.", "evidence": "There are also several courtyard cafes and souvenir shops."}
+    ],
+    "Pamban Bridge": [
+      {"id": "PB01", "fact": "Pamban Bridge is a railway bridge.", "evidence": "Pamban Bridge is a railway bridge which connects the town of Mandapam in mainland India with Pamban Island, and Rameswaram."},
+      {"id": "PB02", "fact": "Pamban Bridge opened on 24 February 1914.", "evidence": "Opened on 24 February 1914, it was India's first sea bridge, and was the longest sea bridge in India until the opening of the Bandra-Worli Sea Link in 2010."},
+      {"id": "PB03", "fact": "Pamban Bridge was India's first sea bridge.", "evidence": "Opened on 24 February 1914, it was India's first sea bridge, and was the longest sea bridge in India until the opening of the Bandra-Worli Sea Link in 2010."},
+      {"id": "PB04", "fact": "Pamban Bridge was India's longest sea bridge until the Bandra-Worli Sea Link opened in 2010.", "evidence": "Opened on 24 February 1914, it was India's first sea bridge, and was the longest sea bridge in India until the opening of the Bandra-Worli Sea Link in 2010."},
+      {"id": "PB05", "fact": "For the most part, the rail bridge is a conventional bridge resting on concrete piers.", "evidence": "The rail bridge is, for the most part, a conventional bridge resting on concrete piers, but has a double-leaf bascule section midway, which can be raised to let ships and barges pass through."},
+      {"id": "PB06", "fact": "The rail bridge has a double-leaf bascule section midway.", "evidence": "The rail bridge is, for the most part, a conventional bridge resting on concrete piers, but has a double-leaf bascule section midway, which can be raised to let ships and barges pass through."},
+      {"id": "PB07", "fact": "The bascule section can be raised to let ships and barges pass through.", "evidence": "The rail bridge is, for the most part, a conventional bridge resting on concrete piers, but has a double-leaf bascule section midway, which can be raised to let ships and barges pass through."},
+      {"id": "PB08", "fact": "Until 1988, Pamban Bridge was the only surface transport connecting Rameswaram island to the mainland.", "evidence": "Until 1988, the Pamban bridge was the only surface transport that connected Tamil Nadu's island of Rameswaram to the mainland."},
+      {"id": "PB09", "fact": "The bridge's bascule was damaged in December 2018.", "evidence": "In December 2018, the bascule of this bridge was damaged, which suspended transportation on the bridge for 3 months."},
+      {"id": "PB10", "fact": "The December 2018 damage suspended transportation on the bridge for three months.", "evidence": "In December 2018, the bascule of this bridge was damaged, which suspended transportation on the bridge for 3 months."},
+      {"id": "PB11", "fact": "Rail movement was restored on 27 February 2019.", "evidence": "Rail movement was again restored on 27 February 2019."},
+      {"id": "PB12", "fact": "A road bridge was constructed parallel to the rail bridge in 1988.", "evidence": "In 1988, a road bridge was also constructed parallel to the rail bridge."},
+      {"id": "PB13", "fact": "The road bridge is also known as Annai Indira Gandhi Road Bridge.", "evidence": "This road bridge is also known as Annai Indira Gandhi Road Bridge."},
+      {"id": "PB14", "fact": "The Annai Indira Gandhi Road Bridge connects National Highway 49 with Rameswaram island.", "evidence": "The Annai Indira Gandhi Road Bridge connects the National Highway (NH 49) with the Rameswaram island."},
+      {"id": "PB15", "fact": "The Annai Indira Gandhi Road Bridge stands on the Palk Strait between the shores of Mandapam and Pamban.", "evidence": "It stands on the Palk Strait and between the shores of Mandapam (a place on the Indian mainland)  and Pamban (one of the fishing towns on Rameswaram island)."},
+      {"id": "PB16", "fact": "Pamban Bridge connects Mandapam with Pamban Island and Rameswaram.", "evidence": "Pamban Bridge is a railway bridge which connects the town of Mandapam in mainland India with Pamban Island, and Rameswaram."},
+      {"id": "PB17", "fact": "Mandapam is a town in mainland India.", "evidence": "Pamban Bridge is a railway bridge which connects the town of Mandapam in mainland India with Pamban Island, and Rameswaram."},
+      {"id": "PB18", "fact": "Pamban is one of the fishing towns on Rameswaram island.", "evidence": "It stands on the Palk Strait and between the shores of Mandapam (a place on the Indian mainland)  and Pamban (one of the fishing towns on Rameswaram island)."}
+    ]
+  }
+}

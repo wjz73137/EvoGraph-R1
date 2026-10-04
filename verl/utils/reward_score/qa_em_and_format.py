@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import re
+import json
 import string
 import random
-from eval import cal_em, cal_f1
+from collections import Counter
 
 def normalize_answer(s):
     def remove_articles(text):
@@ -32,6 +33,44 @@ def normalize_answer(s):
         return text.lower()
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+
+def cal_em(gold_batches, predictions):
+    """Corpus mean exact match using the module's QA normalization."""
+    scores = []
+    for golds, prediction in zip(gold_batches, predictions):
+        if isinstance(golds, str):
+            golds = [golds]
+        normalized_prediction = normalize_answer(str(prediction))
+        scores.append(float(any(
+            normalize_answer(str(gold)) == normalized_prediction for gold in golds
+        )))
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def cal_f1(gold_batches, predictions):
+    """Corpus mean token F1, taking the best score across valid answers."""
+    scores = []
+    for golds, prediction in zip(gold_batches, predictions):
+        if isinstance(golds, str):
+            golds = [golds]
+        prediction_tokens = normalize_answer(str(prediction)).split()
+        best = 0.0
+        for gold in golds:
+            gold_tokens = normalize_answer(str(gold)).split()
+            common = Counter(prediction_tokens) & Counter(gold_tokens)
+            overlap = sum(common.values())
+            if not prediction_tokens and not gold_tokens:
+                score = 1.0
+            elif overlap == 0:
+                score = 0.0
+            else:
+                precision = overlap / len(prediction_tokens)
+                recall = overlap / len(gold_tokens)
+                score = 2 * precision * recall / (precision + recall)
+            best = max(best, score)
+        scores.append(best)
+    return sum(scores) / len(scores) if scores else 0.0
 
 
 def em_check(prediction, golden_answers):
@@ -80,35 +119,53 @@ def compute_score_format(solution_str):
         return 0.0
     
     try:
-        # Perfect format match for the new structure
-        # First <|im_start|>assistant should have <think> and possibly <tool_call>
-        # Then <|im_start|>tool with <knowledge> (can repeat with assistant/tool pairs)
-        # Final <|im_start|>assistant with the answer and <|im_end|>
-        
-        # Check for basic structure with <|im_start|>assistant and <|im_end|> tags
         assistant_blocks = re.findall(r'<\|im_start\|>assistant\n(.*?)<\|im_end\|>', solution_str, re.DOTALL)
-
-        format_reward = 0.0
-        
-        # If no blocks found, return 0
         if not assistant_blocks:
             return 0.0
-        
-        # Perfect format requires at least one assistant block and matching tool blocks if tool calls exist
-        # Check first assistant block contains <think> tags
-        for i, assistant_block in enumerate(assistant_blocks[:-1]):
-            if assistant_block.count('<think>') == 1 and assistant_block.count('</think>') == 1 and assistant_block.count('<tool_call>') == 1 and assistant_block.count('</tool_call>') == 1:
-                think_match = re.search(r'^<think>(.*?)</think>\n<tool_call>(.*?)</tool_call>$', assistant_block, re.DOTALL)
-                if think_match:
-                    # format_reward += 0.2 * (0.8 ** i)
-                    format_reward += 0.5
 
-        # Check the last assistant block contains <answer> tags
-        if assistant_blocks:  # 确保有至少一个assistant块
-            last_assistant_block = assistant_blocks[-1]
-            think_answer_match = re.search(r'^<think>(.*?)</think>\n<answer>(.*?)</answer>$', last_assistant_block, re.DOTALL)
-            if think_answer_match:
-                format_reward += 0.5
+        def parse_tool_call(block):
+            match = re.fullmatch(
+                r'\s*<think>(.*?)</think>\s*<tool_call>(.*?)</tool_call>\s*',
+                block,
+                re.DOTALL,
+            )
+            if match is None:
+                return None
+            try:
+                payload = json.loads(match.group(2))
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(payload, dict) or payload.get("tool") != "kb_search":
+                return None
+            args = payload.get("args")
+            if not isinstance(args, dict):
+                return None
+            query = args.get("query")
+            return query.strip() if isinstance(query, str) else None
+
+        # Strong retrieval protocol: visual grounding, then natural-language
+        # graph lookup, then one final answer.  A visual-only shortcut no
+        # longer receives the same full format reward as the complete chain.
+        format_reward = 0.0
+        first_query = parse_tool_call(assistant_blocks[0])
+        visual_ok = first_query == "<img>"
+        if visual_ok:
+            format_reward += 0.25
+
+        text_ok = False
+        if visual_ok and len(assistant_blocks) >= 2:
+            second_query = parse_tool_call(assistant_blocks[1])
+            text_ok = bool(second_query and second_query != "<img>")
+            if text_ok:
+                format_reward += 0.25
+
+        final_match = re.fullmatch(
+            r'\s*<think>(.*?)</think>\s*<answer>(.*?)</answer>\s*',
+            assistant_blocks[-1],
+            re.DOTALL,
+        )
+        if final_match is not None and final_match.group(2).strip():
+            format_reward += 0.5
     except Exception as e:
         print(f"[DEBUG] Error in compute_score_format: {e}")
         return 0.0
@@ -176,7 +233,6 @@ def compute_score_format_answer(solution_str, ground_truth):
         format_reward = compute_score_format(solution_str)
         answer_reward = compute_score_answer(solution_str, ground_truth)
 
-        format_reward = min(format_reward, 1.0)
         if format_reward == 1.0:
             return -1.0 + format_reward + answer_reward
         else:

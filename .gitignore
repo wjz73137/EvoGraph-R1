@@ -51,6 +51,10 @@ outputs/
 wandb/
 
 # Multimodal generated workspaces
+/datasets
+/datasets_mm
+/expr
+/expr_mm
 /datasets/*
 !/datasets/README.md
 /datasets_mm/*

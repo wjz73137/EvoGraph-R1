@@ -63,11 +63,15 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                  inference_engine: LLM,
                  model_config,
                  full_params: bool = False,
-                 device_mesh: DeviceMesh = None):
+                 device_mesh: DeviceMesh = None,
+                 sleep_level: int = 1):
         self.module = module
         self.inference_engine = inference_engine
         self.model_config = model_config
         self.device_mesh = device_mesh
+        self.sleep_level = int(sleep_level)
+        if self.sleep_level not in (1, 2):
+            raise ValueError(f'vLLM sleep_level must be 1 or 2, got {self.sleep_level}')
 
         # Full params
         self.full_params = full_params
@@ -133,7 +137,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
             self.inference_engine.offload_model_weights()
         else:
-            self.inference_engine.sleep(level=1)
+            self.inference_engine.sleep(level=self.sleep_level)
         log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
 
         # self.module.to('cuda')

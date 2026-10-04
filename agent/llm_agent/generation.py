@@ -43,6 +43,9 @@ class ToolGenerationConfig:
     pipeline_response_end: str = "</pipeline>"
     tool_custom_response_template: str = ""
     force_first_image_search: bool = True
+    force_graph_edit_verification: bool = False
+    response_guidance: bool = False
+    max_turn_response_length: int | None = None
 
 
 @dataclass
@@ -113,6 +116,9 @@ class ToolGenerationManager:
             match = re.search(tool_pattern, resp, re.DOTALL)
 
             if not match:
+                repaired = self._repair_unclosed_tool_call(resp)
+                if repaired is not None:
+                    return repaired + self.tokenizer.eos_token, True
                 # A dangling tool-call start often makes HF rollout spend a full
                 # max_new_tokens pass on every retry. End the trajectory instead
                 # of letting a malformed call dominate validation/training time.
@@ -125,6 +131,65 @@ class ToolGenerationManager:
         # Process each response string (single pass)
         processed = [process_single_response(resp) for resp in responses_str]
         return [p[0] for p in processed], [p[1] for p in processed]
+
+    def _repair_unclosed_tool_call(self, response: str) -> str | None:
+        """Normalize a complete JSON tool call whose XML closing tag is malformed.
+
+        The generated tool name and arguments are preserved verbatim at the JSON
+        value level. A narrowly scoped fallback also repairs JSON punctuation
+        after all required string values have already been closed; it never
+        invents or completes argument text.
+        """
+        start = response.find(self.config.tool_call_start)
+        if start < 0:
+            return None
+        payload_start = start + len(self.config.tool_call_start)
+        payload = response[payload_start:].lstrip()
+        try:
+            value, _ = json.JSONDecoder().raw_decode(payload)
+        except (json.JSONDecodeError, TypeError):
+            value = self._recover_closed_string_tool_call(payload)
+            if value is None:
+                return None
+        if not isinstance(value, dict):
+            return None
+        if not isinstance(value.get("tool"), str) or not isinstance(value.get("args"), dict):
+            return None
+        normalized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        prefix = response[:start]
+        return f"{prefix}{self.config.tool_call_start}{normalized}{self.config.tool_call_end}"
+
+    @staticmethod
+    def _recover_closed_string_tool_call(payload: str) -> Dict[str, Any] | None:
+        """Recover missing braces/tags only when every required value is complete."""
+        def string_field(name: str) -> str | None:
+            match = re.search(
+                rf'"{re.escape(name)}"\s*:\s*("(?:\\.|[^"\\])*")',
+                payload,
+                flags=re.DOTALL,
+            )
+            if not match:
+                return None
+            try:
+                value = json.loads(match.group(1))
+            except (TypeError, ValueError):
+                return None
+            return value if isinstance(value, str) and value.strip() else None
+
+        tool = string_field("tool")
+        required_fields = {
+            "kb_search": ("query",),
+            "websearch": ("query",),
+            "insert": ("content",),
+            "update": ("content", "new_content"),
+            "delete": ("content",),
+        }.get(tool)
+        if required_fields is None:
+            return None
+        args = {name: string_field(name) for name in required_fields}
+        if any(value is None for value in args.values()):
+            return None
+        return {"tool": tool, "args": args}
 
     def _forced_image_search_response(self) -> str:
         return (
@@ -145,6 +210,71 @@ class ToolGenerationManager:
             and self._has_multimodal_data(rollings.non_tensor_batch)
         )
 
+    def _graph_edit_verification_query(self, env: Any) -> str | None:
+        """Return the fact that must be searched immediately after a successful edit."""
+        history = list(getattr(env, "tool_history", []) or [])
+        if not history:
+            return None
+        last_call = history[-1]
+        if last_call.get("tool") not in {"insert", "update"}:
+            return None
+        if not self._tool_result_succeeded(last_call.get("result")):
+            return None
+
+        args = last_call.get("args") if isinstance(last_call.get("args"), dict) else {}
+        value = args.get("new_content") if last_call.get("tool") == "update" else args.get("content")
+        if isinstance(value, str):
+            return value.strip() or None
+        if isinstance(value, list):
+            parts = [str(item).strip() for item in value if str(item).strip()]
+            return " ".join(parts) or None
+        return None
+
+    def _forced_graph_edit_verification_response(self, query: str) -> str:
+        payload = json.dumps(
+            {"tool": "kb_search", "args": {"query": query}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return (
+            "<think>Verify that the successful graph edit is searchable.</think>\n"
+            f"{self.config.tool_call_start}{payload}{self.config.tool_call_end}"
+            + self.tokenizer.eos_token
+        )
+
+    def _apply_forced_graph_edit_verification(
+        self,
+        responses_ids: torch.Tensor,
+        responses_str: List[str],
+        new_active_masks: torch.Tensor,
+        active_mask: torch.Tensor,
+        envs: List[Any] | None,
+    ) -> Tuple[torch.Tensor, List[str], torch.Tensor, int]:
+        """Replace only trajectories that immediately require post-edit verification."""
+        if not getattr(self.config, "force_graph_edit_verification", False) or not envs:
+            return responses_ids, responses_str, new_active_masks, 0
+
+        active_envs = [env for env, active in zip(envs, active_mask.tolist()) if active]
+        forced_count = 0
+        updated_responses = list(responses_str)
+        updated_masks = new_active_masks.clone()
+        for local_index, env in enumerate(active_envs):
+            query = self._graph_edit_verification_query(env)
+            if query is None:
+                continue
+            updated_responses[local_index] = self._forced_graph_edit_verification_response(query)
+            updated_masks[local_index] = True
+            forced_count += 1
+
+        if not forced_count:
+            return responses_ids, responses_str, new_active_masks, 0
+        return (
+            self._batch_tokenize(updated_responses),
+            updated_responses,
+            updated_masks,
+            forced_count,
+        )
+
     def _postprocess_responses(self, responses: torch.Tensor) -> torch.Tensor:
         """Process responses to extract tool calls."""
         responses_str = self.tokenizer.batch_decode(
@@ -162,18 +292,58 @@ class ToolGenerationManager:
     
     def _process_tool_responses(self, tool_responses: List[str]) -> torch.Tensor:
         """Process tool responses to token ids"""
-        
-        tool_responses_ids = self.tokenizer(
-            tool_responses, 
-            padding='longest',
-            return_tensors='pt'
-        )['input_ids']
-        
-        if tool_responses_ids.shape[1] > self.config.max_tool_response_length:
-            print("[WARNING] TOOL RESPONSE TOO LONG, CONSIDER CHANGING YOUR CONFIG")
-            tool_responses_ids = tool_responses_ids[:, :self.config.max_tool_response_length]
-            
-        return tool_responses_ids
+
+        encoded_rows = self.tokenizer(
+            tool_responses,
+            add_special_tokens=False,
+            padding=False,
+        )["input_ids"]
+        marker_ids = self.tokenizer(
+            "\n[Earlier tool results truncated; required next action follows.]\n",
+            add_special_tokens=False,
+        )["input_ids"]
+        truncated_rows = []
+        truncated_count = 0
+        for token_ids in encoded_rows:
+            if len(token_ids) > self.config.max_tool_response_length:
+                truncated_count += 1
+                token_ids = self._middle_truncate_token_ids(
+                    token_ids,
+                    self.config.max_tool_response_length,
+                    marker_ids,
+                )
+            truncated_rows.append(token_ids)
+        if truncated_count:
+            print(
+                "TOOL_RESPONSES_MIDDLE_TRUNCATED: "
+                f"rows={truncated_count}/{len(encoded_rows)} "
+                f"limit={self.config.max_tool_response_length}",
+                flush=True,
+            )
+        return self.tokenizer.pad(
+            {"input_ids": truncated_rows},
+            padding=True,
+            return_tensors="pt",
+        )["input_ids"]
+
+    @staticmethod
+    def _middle_truncate_token_ids(
+        token_ids: List[int],
+        max_length: int,
+        marker_ids: List[int],
+    ) -> List[int]:
+        """Preserve leading evidence and trailing state guidance under a token cap."""
+        if len(token_ids) <= max_length:
+            return list(token_ids)
+        marker = list(marker_ids[:max_length])
+        remaining = max_length - len(marker)
+        if remaining <= 0:
+            return marker
+        head_length = (remaining * 3) // 5
+        tail_length = remaining - head_length
+        if tail_length == 0:
+            return list(token_ids[:head_length]) + marker
+        return list(token_ids[:head_length]) + marker + list(token_ids[-tail_length:])
 
     def _to_token_list(self, token_ids: Any) -> List[int]:
         if isinstance(token_ids, torch.Tensor):
@@ -245,18 +415,137 @@ class ToolGenerationManager:
     def _prepare_tool_responses_multimodal(
         self,
         tool_responses: List[str],
+        envs: List[Any] | None = None,
     ) -> Tuple[List[str], List[List[Any]]]:
         prepared_responses = []
         response_images = []
-        for tool_response in tool_responses:
+        for index, tool_response in enumerate(tool_responses):
             image_paths = self._extract_tool_response_image_paths(tool_response)
             images = self._load_tool_response_images(image_paths)
             tool_response = self._strip_tool_response_image_fields(tool_response)
+            anchor_entity = self._first_result_entity(tool_response) if image_paths else ""
+            if self.config.response_guidance and tool_response:
+                tool_response = self._append_next_action_guidance(
+                    tool_response,
+                    image_response=bool(image_paths),
+                    env=envs[index] if envs and index < len(envs) else None,
+                    anchor_entity=anchor_entity,
+                )
             if images:
                 tool_response = self._append_image_placeholders(tool_response, len(images))
             prepared_responses.append(tool_response)
             response_images.append(images)
         return prepared_responses, response_images
+
+    def _append_next_action_guidance(
+        self,
+        tool_response: str,
+        *,
+        image_response: bool,
+        env: Any = None,
+        anchor_entity: str = "",
+    ) -> str:
+        """Add the next GraphEdit state transition to a tool observation."""
+        history = list(getattr(env, "tool_history", []) or [])
+        last_call = history[-1] if history else {}
+        last_tool = last_call.get("tool")
+        last_args = last_call.get("args") if isinstance(last_call.get("args"), dict) else {}
+        successful_edit_seen = any(
+            call.get("tool") in {"insert", "update", "delete"}
+            and self._tool_result_succeeded(call.get("result"))
+            for call in history
+        )
+
+        if image_response:
+            anchor = anchor_entity or "<top-ranked entity name>"
+            guidance = (
+                f"The required visual anchor is the first and top-ranked entity: {anchor}. "
+                "Do not substitute a lower-ranked candidate. Your next response MUST be the "
+                "required text lookup even if you think you already know the answer. Use exactly "
+                "this JSON shape with a concrete query: "
+                f'<tool_call>{{"tool":"kb_search","args":{{"query":"{anchor} <fact asked by the original question>"}}}}</tool_call>. '
+                "Do not answer and do not call websearch before this text KB lookup."
+            )
+        elif "Invalid arguments for tool 'websearch'" in tool_response:
+            guidance = (
+                "Next required action: retry websearch now. Put the concrete search phrase "
+                "inside args.query, not in log or another top-level field. Use exactly: "
+                '<tool_call>{"tool":"websearch","args":{"query":"<entity name> <missing fact>"}}</tool_call>.'
+            )
+        elif last_tool == "websearch":
+            guidance = (
+                "Next required action: if the web evidence states the requested fact "
+                "specifically, insert one short atomic fact into the graph. Use exactly: "
+                '<tool_call>{"tool":"insert","args":{"content":"<entity> <relation> <verified value>."}}</tool_call>. '
+                "Do not answer before the graph edit and its verification."
+            )
+        elif last_tool in {"insert", "update", "delete"}:
+            if self._tool_result_succeeded(last_call.get("result")):
+                guidance = (
+                    "Next required action: verify the successful graph edit with a text "
+                    "kb_search for the edited entity and fact. Use exactly: "
+                    '<tool_call>{"tool":"kb_search","args":{"query":"<entity name> <edited fact>"}}</tool_call>. '
+                    "Do not answer before verification."
+                )
+            else:
+                if "pre-commit evidence gate" in tool_response:
+                    guidance = (
+                        "The pre-commit gate rejected this graph edit. Read its conflict type "
+                        "and reason, keep the top-ranked visual anchor fixed, and use only prior "
+                        "web evidence that explicitly refers to that exact entity and location. "
+                        "Retry one short atomic edit; do not reuse a namesake fact and do not "
+                        "answer before a successful edit and verification."
+                    )
+                else:
+                    guidance = (
+                        "The graph edit did not succeed. Correct the edit arguments using the "
+                        "reported error, then retry one insert, update, or delete call."
+                    )
+        elif last_tool == "kb_search" and last_args.get("query") != "<img>":
+            if successful_edit_seen:
+                guidance = (
+                    "The edited fact has now been queried for verification. If it appears in "
+                    "the returned KB evidence, answer with exactly one <answer>...</answer> "
+                    "block containing only the shortest answer span."
+                )
+            else:
+                guidance = (
+                "Check whether this KB result explicitly states the exact fact requested "
+                "by the original question. Do not infer the answer from the entity name or "
+                "merely related context. If the exact fact is present, answer with only the "
+                "short answer span. If it is absent, the next required action is websearch "
+                "using an entity-first query that includes a distinguishing location or other "
+                "identity detail from the KB result. Use this exact shape: "
+                '<tool_call>{"tool":"websearch","args":{"query":"<entity name> <location or identity detail> <missing fact>"}}</tool_call>.'
+            )
+        else:
+            guidance = (
+                "Follow the required GraphEdit sequence using only the listed tools and exact "
+                "JSON argument shapes."
+            )
+
+        end_tag = self.config.tool_response_end
+        if end_tag in tool_response:
+            return tool_response.replace(end_tag, f"\n{guidance}\n{end_tag}", 1)
+        return f"{tool_response}\n{guidance}"
+
+    def _first_result_entity(self, tool_response: str) -> str:
+        pattern = (
+            re.escape(self.config.tool_response_start)
+            + r"\s*(.*?)\s*"
+            + re.escape(self.config.tool_response_end)
+        )
+        match = re.search(pattern, tool_response, flags=re.DOTALL)
+        payload = match.group(1) if match else tool_response
+        try:
+            parsed = json.loads(payload)
+        except (TypeError, ValueError):
+            return ""
+        results = parsed.get("results") if isinstance(parsed, dict) else None
+        if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+            return ""
+        entity = results[0].get("entity")
+        return str(entity).strip() if entity is not None else ""
 
     def _strip_tool_response_image_fields(self, tool_response: str) -> str:
         """Hide local image locators from the model-visible tool response."""
@@ -505,7 +794,7 @@ class ToolGenerationManager:
             cur_responses,
             tool_responses_ids
         ])
-        
+
         new_attention_mask = self.tensor_fn.create_attention_mask(new_input_ids)
 
         # Cut to appropriate length
@@ -819,17 +1108,54 @@ class ToolGenerationManager:
             represented_spans = min(prompt_spans_seen, len(prompt_counts)) + min(response_spans_seen, len(response_counts))
             if represented_spans < total_span_count:
                 dropped_spans += total_span_count - represented_spans
-            if prompt_changed or response_changed:
+            new_prompt_ids, kept_prompt_spans, truncated_prompt_spans = self._drop_trailing_vision_spans_to_fit(
+                new_prompt_ids,
+                prompts.shape[1],
+            )
+            new_response_ids, kept_response_spans, truncated_response_spans = self._drop_trailing_vision_spans_to_fit(
+                new_response_ids,
+                self.config.max_response_length,
+            )
+            dropped_spans += truncated_prompt_spans + truncated_response_spans
+
+            # Images follow the same order as their placeholders: prompt images
+            # first, then images returned by tools.  When an oversized final
+            # sequence forces us to remove a complete trailing vision span, the
+            # corresponding image must be removed as well.  Merely slicing the
+            # image list to the total number of spans is incorrect when a prompt
+            # image is retained while a response image is dropped.
+            retained_images = (
+                images[:kept_prompt_spans]
+                + images[prompt_span_count:prompt_span_count + kept_response_spans]
+            )
+            if retained_images:
+                item["image"] = retained_images
+            else:
+                item.pop("image", None)
+            trimmed_images += max(0, len(images) - len(retained_images))
+
+            if prompt_changed or response_changed or truncated_prompt_spans or truncated_response_spans:
                 changed_rows += 1
 
             prompt_lists.append(self._truncate_token_list_preserving_vision(new_prompt_ids, prompts.shape[1]))
             response_lists.append(self._truncate_token_list_preserving_vision(new_response_ids, self.config.max_response_length))
             aligned_mm.append(item)
 
-        prompt_width = prompts.shape[1]
+        # The dataset pads every prompt to max_prompt_length.  Keeping that
+        # width after rebuilding the multimodal batch wastes activation memory
+        # when remove-padding is disabled (the supported Qwen2.5-VL path in
+        # this project).  Re-pad only to the longest real prompt in this batch.
+        prompt_width = max(1, min(prompts.shape[1], max(len(ids) for ids in prompt_lists)))
         response_width = max(1, min(self.config.max_response_length, max(len(ids) for ids in response_lists)))
         new_prompts = self._pad_token_lists(prompt_lists, prompt_width, pad_to_left=True).to(prompts.device)
         new_responses = self._pad_token_lists(response_lists, response_width, pad_to_left=False).to(responses.device)
+
+        if prompt_width < prompts.shape[1] or response_width < responses.shape[1]:
+            print(
+                f"FINAL_MM_COMPACT_WIDTHS: prompt={prompts.shape[1]}->{prompt_width} "
+                f"response={responses.shape[1]}->{response_width}",
+                flush=True,
+            )
 
         if changed_rows or trimmed_images or dropped_spans:
             print(
@@ -876,15 +1202,51 @@ class ToolGenerationManager:
             cursor = end
         return spans
 
+    def _drop_trailing_vision_spans_to_fit(
+        self,
+        token_ids: List[int],
+        max_len: int,
+    ) -> Tuple[List[int], int, int]:
+        """Drop complete trailing vision spans until all retained spans fit.
+
+        Text is deliberately left in place here; the normal left-truncation
+        step below chooses the most recent text with the remaining budget.  The
+        important invariant is that truncation can never bisect a Qwen-VL
+        ``vision_start ... vision_end`` block.
+        """
+        max_len = max(0, int(max_len))
+        spans = self._find_vision_spans(token_ids)
+        retained = len(spans)
+        span_token_count = sum(end - start for start, end in spans)
+        if span_token_count <= max_len:
+            return token_ids, retained, 0
+
+        keep = [True] * len(token_ids)
+        dropped = 0
+        for start, end in reversed(spans):
+            if span_token_count <= max_len:
+                break
+            for pos in range(start, end):
+                keep[pos] = False
+            span_token_count -= end - start
+            retained -= 1
+            dropped += 1
+
+        return [token for token, should_keep in zip(token_ids, keep) if should_keep], retained, dropped
+
     def _truncate_token_list_preserving_vision(self, token_ids: List[int], max_len: int) -> List[int]:
         """Left-truncate token lists without cutting Qwen-VL vision spans."""
         max_len = int(max_len)
         if len(token_ids) <= max_len:
             return token_ids
 
+        token_ids, _, _ = self._drop_trailing_vision_spans_to_fit(token_ids, max_len)
+        if len(token_ids) <= max_len:
+            return token_ids
+
         spans = self._find_vision_spans(token_ids)
         span_token_count = sum(end - start for start, end in spans)
-        if not spans or span_token_count >= max_len:
+        if not spans:
             return token_ids[-max_len:]
 
         keep = [False] * len(token_ids)
@@ -893,6 +1255,12 @@ class ToolGenerationManager:
                 keep[pos] = True
 
         tail_budget = max_len - span_token_count
+        if tail_budget <= 0:
+            return [
+                token
+                for pos, token in enumerate(token_ids)
+                if keep[pos]
+            ]
         for pos in range(len(token_ids) - 1, -1, -1):
             if keep[pos]:
                 continue
@@ -952,29 +1320,10 @@ class ToolGenerationManager:
                 continue
 
             token_ids = valid.detach().cpu().tolist()
-            spans = self._find_vision_spans(token_ids)
-            span_token_count = sum(end - start for start, end in spans)
-            if not spans or span_token_count >= max_len:
-                output[row_idx] = valid[-max_len:]
-                continue
-
-            keep = torch.zeros(valid.shape[0], dtype=torch.bool, device=valid.device)
-            for start, end in spans:
-                keep[start:end] = True
-
-            tail_budget = max_len - span_token_count
-            for pos in range(valid.shape[0] - 1, -1, -1):
-                if keep[pos]:
-                    continue
-                keep[pos] = True
-                tail_budget -= 1
-                if tail_budget == 0:
-                    break
-
-            kept = valid[keep]
-            if kept.numel() > max_len:
-                kept = kept[-max_len:]
-            output[row_idx, -kept.numel():] = kept
+            kept_ids = self._truncate_token_list_preserving_vision(token_ids, max_len)
+            if kept_ids:
+                kept = torch.tensor(kept_ids, dtype=valid.dtype, device=valid.device)
+                output[row_idx, -kept.numel():] = kept
 
         return output
 
@@ -1070,6 +1419,55 @@ class ToolGenerationManager:
         from agent.tool.tools.graphr1_base_tool import GraphR1BaseTool
         GraphR1BaseTool.flush_deferred_io()
 
+    @staticmethod
+    def _tool_result_succeeded(result: Any) -> bool:
+        if isinstance(result, dict):
+            return bool(result.get("success", False))
+        if not isinstance(result, str):
+            return False
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and bool(payload.get("success", False))
+
+    @staticmethod
+    def _kb_search_returned_evidence(result: Any) -> bool:
+        if not isinstance(result, str) or not result.strip():
+            return False
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        results = payload.get("results")
+        return isinstance(results, list) and bool(results)
+
+    @classmethod
+    def _trajectory_tool_metrics(cls, env: Any) -> Dict[str, int]:
+        history = list(getattr(env, "tool_history", []) or [])
+        successful_edit_indices = [
+            index
+            for index, call in enumerate(history)
+            if call.get("tool") in {"insert", "update", "delete"}
+            and cls._tool_result_succeeded(call.get("result"))
+        ]
+        verified_edits = sum(
+            any(
+                later.get("tool") == "kb_search"
+                and cls._kb_search_returned_evidence(later.get("result"))
+                for later in history[index + 1 :]
+            )
+            for index in successful_edit_indices
+        )
+        return {
+            "duplicate_search_count": int(getattr(env, "duplicate_search_count", 0)),
+            "successful_graph_edit_count": len(successful_edit_indices),
+            "verified_graph_edit_count": int(verified_edits),
+            "websearch_count": sum(call.get("tool") == "websearch" for call in history),
+        }
+
 
     def _select_active_rollings(self, rollings: DataProto, active_mask: torch.Tensor) -> DataProto:
         return DataProto.from_dict(
@@ -1085,6 +1483,10 @@ class ToolGenerationManager:
             if active_batch size is not divisible by num_gpus, pad with first sequence
             then remove padding from output
         """
+        max_turn_response_length = getattr(self.config, "max_turn_response_length", None)
+        if max_turn_response_length is not None:
+            active_batch.meta_info["response_length"] = int(max_turn_response_length)
+
         num_gpus = self.config.num_gpus
         if num_gpus <= 1:
             return self.actor_rollout_wg.generate_sequences(active_batch)
@@ -1178,6 +1580,22 @@ class ToolGenerationManager:
 
                 meta_info = gen_output.meta_info
                 responses_ids, responses_str, new_active_masks = self._postprocess_responses(gen_output.batch['responses'])
+            responses_ids, responses_str, new_active_masks, forced_verifications = (
+                self._apply_forced_graph_edit_verification(
+                    responses_ids,
+                    responses_str,
+                    new_active_masks,
+                    active_mask,
+                    envs,
+                )
+            )
+            if forced_verifications:
+                print(
+                    f"ROLLOUT_TURN_FORCED_GRAPH_EDIT_VERIFICATION: "
+                    f"step={step} forced={forced_verifications} "
+                    f"active={active_mask.sum().item()}",
+                    flush=True,
+                )
             responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask)
 
             active_mask[active_mask.clone()] = new_active_masks
@@ -1192,7 +1610,10 @@ class ToolGenerationManager:
                 tool_responses = self._execute_tool_calls(responses_str, envs, active_mask)
 
             active_num_list.append(active_mask.sum().item())
-            tool_responses, tool_response_images = self._prepare_tool_responses_multimodal(tool_responses)
+            tool_responses, tool_response_images = self._prepare_tool_responses_multimodal(
+                tool_responses,
+                envs=envs,
+            )
             tool_responses_ids = self._process_tool_responses(tool_responses)
             
             # Update states
@@ -1213,7 +1634,20 @@ class ToolGenerationManager:
         print("ACTIVE_TRAJ_NUM:", active_num_list)
         
         original_right_side['turns'] = turns
-        
+
+        tool_metrics = [self._trajectory_tool_metrics(env) for env in (envs or [])]
+        if len(tool_metrics) == batch_size:
+            for metric_name in (
+                "duplicate_search_count",
+                "successful_graph_edit_count",
+                "verified_graph_edit_count",
+                "websearch_count",
+            ):
+                original_right_side[metric_name] = torch.tensor(
+                    [metrics[metric_name] for metrics in tool_metrics],
+                    dtype=torch.int32,
+                )
+
         # Save trajectory and return final output
         output_non_tensors = {}
         if not self.is_validation:

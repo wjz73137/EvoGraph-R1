@@ -50,6 +50,8 @@ def iter_active_hyperedge_contents(hyperedges_data: Dict) -> Iterable[str]:
             continue
         if hyperedge.get("deleted", False):
             continue
+        if hyperedge.get("searchable", True) is False:
+            continue
         content = hyperedge.get("content") or hyperedge.get("hyperedge_name")
         if isinstance(content, str) and content.strip():
             yield content
@@ -59,6 +61,8 @@ def iter_searchable_hyperedge_contents(hyperedges_data: Dict) -> Iterable[str]:
     """Yield searchable hyperedge content in KV insertion order."""
     for hyperedge in hyperedges_data.values():
         if not isinstance(hyperedge, dict):
+            continue
+        if hyperedge.get("searchable", True) is False:
             continue
         content = hyperedge.get("content") or hyperedge.get("hyperedge_name")
         if isinstance(content, str) and content.strip():
@@ -406,7 +410,9 @@ def rebuild_hyperedge_vector_index(
     active_count = sum(
         1
         for hyperedge in data.values()
-        if isinstance(hyperedge, dict) and not hyperedge.get("deleted", False)
+        if isinstance(hyperedge, dict)
+        and not hyperedge.get("deleted", False)
+        and hyperedge.get("searchable", True) is not False
     )
     ensure_hyperedge_index_sidecars(
         working_dir,

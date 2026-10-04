@@ -110,6 +110,40 @@ def entropy_from_logits(logits: torch.Tensor):
     return entropy
 
 
+def entropy_from_logits_chunked(logits: torch.Tensor, chunk_size: int = 128):
+    """Calculate exact entropy with bounded vocabulary-softmax activation memory.
+
+    Large-vocabulary vision-language models can otherwise materialize multiple
+    ``response_length x vocabulary`` tensors at once.  Sequence chunks keep the
+    forward peak bounded, while non-reentrant activation checkpointing avoids
+    retaining every chunk's softmax tensor until backward.  This changes only
+    execution strategy; values and gradients are the same as
+    :func:`entropy_from_logits` up to normal floating-point roundoff.
+    """
+    if chunk_size <= 0:
+        return entropy_from_logits(logits)
+    output_shape = logits.shape[:-1]
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    if flat_logits.shape[0] <= chunk_size:
+        return entropy_from_logits(logits)
+
+    outputs = []
+    for chunk in flat_logits.split(chunk_size, dim=0):
+        if torch.is_grad_enabled() and chunk.requires_grad:
+            from torch.utils.checkpoint import checkpoint
+
+            chunk_entropy = checkpoint(
+                entropy_from_logits,
+                chunk,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        else:
+            chunk_entropy = entropy_from_logits(chunk)
+        outputs.append(chunk_entropy)
+    return torch.cat(outputs, dim=0).reshape(output_shape)
+
+
 def masked_sum(values, mask, axis=None):
     """Compute mean of tensor with a masked values."""
     return (values * mask).sum(axis=axis)

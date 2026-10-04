@@ -26,7 +26,7 @@ TOP_K_FIELDS = (
 )
 TEXT_TOP_K_FIELDS = ("entity_top_k", "hyperedge_top_k", "rag_top_k")
 IMAGE_QUERY_TOKEN = "<img>"
-DEFAULT_VISUAL_ENTITY_TOP_K = 3
+DEFAULT_VISUAL_ENTITY_TOP_K = 5
 
 
 class MMKBSearchTool(Tool):
@@ -78,7 +78,7 @@ class MMKBSearchTool(Tool):
             if image_query
             else self._build_text_payload([query], args)
         )
-        api_url = self._api_url_for_query(query)
+        api_url = self._api_url_for_query(query, args)
         try:
             resp = requests.post(api_url, json=payload, timeout=self.timeout)
             if resp.status_code != 200:
@@ -97,11 +97,12 @@ class MMKBSearchTool(Tool):
         results = [self._empty_result() for _ in args_list]
         grouped_indices = self._group_indices_by_route_and_top_k_options(args_list)
         for group_key, indices in grouped_indices.items():
-            route = dict(group_key).get("route")
+            group_options = dict(group_key)
+            route = group_options.get("route")
             top_k_options = {
                 key: value
                 for key, value in dict(group_key).items()
-                if key != "route"
+                if key not in {"route", "api_url"}
             }
             image_query = route == "image"
             payload = (
@@ -112,7 +113,7 @@ class MMKBSearchTool(Tool):
                     top_k_options,
                 )
             )
-            api_url = self.search_api_url if image_query else self.text_search_api_url
+            api_url = group_options["api_url"]
             try:
                 resp = requests.post(api_url, json=payload, timeout=self.timeout)
                 if resp.status_code != 200:
@@ -195,19 +196,26 @@ class MMKBSearchTool(Tool):
                 payload[field] = value
         return payload
 
-    @staticmethod
-    def _group_indices_by_route_and_top_k_options(args_list: List[Dict]) -> dict:
+    def _group_indices_by_route_and_top_k_options(self, args_list: List[Dict]) -> dict:
         grouped = defaultdict(list)
         for index, args in enumerate(args_list):
             query = MMKBSearchTool._clean_string(args.get("query"))
             image_query = query == IMAGE_QUERY_TOKEN
             fields = TOP_K_FIELDS if image_query else TEXT_TOP_K_FIELDS
             route = "image" if image_query else "text"
-            key = (("route", route), *((field, args.get(field)) for field in fields))
+            api_url = self._api_url_for_query(query, args)
+            key = (
+                ("route", route),
+                ("api_url", api_url),
+                *((field, args.get(field)) for field in fields),
+            )
             grouped[key].append(index)
         return dict(grouped)
 
-    def _api_url_for_query(self, query: str) -> str:
+    def _api_url_for_query(self, query: str, args: Dict | None = None) -> str:
+        routed_url = self._clean_string((args or {}).get("__mm_api_url"))
+        if routed_url:
+            return routed_url
         return self.search_api_url if query == IMAGE_QUERY_TOKEN else self.text_search_api_url
 
     @staticmethod
@@ -283,12 +291,10 @@ class MMKBSearchTool(Tool):
                     "MM_CURRENT_IMAGE_PATH",
                 )
             )
-            image_id = ""
-            if not image_path:
-                image_id = explicit_image_id or cls._first_env(
-                    "EVOGRAPH_MM_CURRENT_IMAGE_ID",
-                    "MM_CURRENT_IMAGE_ID",
-                )
+            image_id = explicit_image_id or cls._first_env(
+                "EVOGRAPH_MM_CURRENT_IMAGE_ID",
+                "MM_CURRENT_IMAGE_ID",
+            )
             context_query = explicit_context_query or cls._first_env(
                 "EVOGRAPH_MM_CURRENT_QUESTION",
                 "MM_CURRENT_QUESTION",

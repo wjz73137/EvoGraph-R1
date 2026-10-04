@@ -54,12 +54,30 @@ def _normalize_tool_call(tool_name: Any, tool_args: Any) -> Dict[str, Any]:
         and "keyword" in tool_args
     ):
         tool_args = {"query": str(tool_args["keyword"])}
+    if normalized_name in {"kb_search", "websearch"} and "query" not in tool_args:
+        for alias in ("keyword", "search_query", "q"):
+            value = tool_args.get(alias)
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                tool_args = dict(tool_args)
+                tool_args["query"] = str(value).strip()
+                break
     if normalized_name == "update" and isinstance(tool_args, dict) and "new_content" not in tool_args:
         for alias in ("updated_content", "replacement", "revised_content", "new_value", "new_text"):
             if alias in tool_args:
                 tool_args = dict(tool_args)
                 tool_args["new_content"] = tool_args[alias]
                 break
+        else:
+            # Small models sometimes describe a missing fact with the update
+            # tool but provide only the would-be new fact. There is no exact
+            # old fact to replace, so this is semantically an insert. The
+            # pre-commit evidence gate still decides whether it may be written.
+            content = tool_args.get("content")
+            if isinstance(content, str) and content.strip():
+                normalized_name = "insert"
+                tool_args = {
+                    "content": re.sub(r"<([^<>]+)>", r"\1", content).strip()
+                }
     return {"tool": normalized_name, "args": tool_args}
 
 
@@ -219,13 +237,26 @@ def _write_tool_execution_result(env, tool_name: str, tool_args: Dict, result: s
 def _inject_tool_context(env, tool_name: str, tool_args: Dict) -> Dict:
     if not isinstance(tool_name, str) or not isinstance(tool_args, dict):
         return tool_args
-    if tool_name not in {"websearch", "kb_search"}:
+    if tool_name not in {"websearch", "kb_search", "insert", "update", "delete"}:
         return tool_args
     context = getattr(env, "tool_context", {}) or {}
     if not context:
         return tool_args
 
     contextualized_args = dict(tool_args)
+    mm_search_api_url = context.get("mm_search_api_url")
+    if tool_name != "websearch" and mm_search_api_url:
+        contextualized_args["__mm_api_url"] = mm_search_api_url
+
+    if tool_name in {"insert", "update", "delete"}:
+        question = context.get("question")
+        if question:
+            contextualized_args["__question"] = str(question)
+        contextualized_args["__trajectory_history"] = deepcopy(
+            list(getattr(env, "tool_history", []) or [])
+        )
+        return contextualized_args
+
     if tool_name == "kb_search":
         if str(contextualized_args.get("query", "")).strip() != "<img>":
             return contextualized_args
@@ -242,11 +273,72 @@ def _inject_tool_context(env, tool_name: str, tool_args: Dict) -> Dict:
 
     data_source = context.get("data_source")
     dataset = context.get("dataset")
+    if tool_name == "websearch" and "graph_edit" in str(data_source).casefold():
+        enriched_query = _grounded_websearch_query(env, context)
+        if enriched_query:
+            contextualized_args["query"] = enriched_query
     if data_source and "__data_source" not in contextualized_args:
         contextualized_args["__data_source"] = data_source
     if dataset and "__dataset" not in contextualized_args:
         contextualized_args["__dataset"] = dataset
     return contextualized_args
+
+
+def _grounded_websearch_query(env, context: Dict[str, Any]) -> str:
+    """Build an entity-first query from already retrieved, non-gold evidence."""
+    history = list(getattr(env, "tool_history", []) or [])
+    anchor = ""
+    identity_facts: list[str] = []
+    for call in history:
+        if call.get("tool") != "kb_search":
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        payload = _json_object(call.get("result"))
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            continue
+        if str(args.get("query", "")).strip() == "<img>" and results:
+            first = results[0]
+            if isinstance(first, dict) and first.get("entity"):
+                anchor = str(first["entity"]).strip()
+            continue
+        for item in results[:5]:
+            if not isinstance(item, dict):
+                continue
+            fact = next(
+                (
+                    str(item[key]).strip().strip('"')
+                    for key in ("<knowledge>", "knowledge", "content", "text")
+                    if item.get(key)
+                ),
+                "",
+            )
+            if fact and fact not in identity_facts:
+                identity_facts.append(fact)
+            if len(identity_facts) >= 2:
+                break
+        if len(identity_facts) >= 2:
+            break
+    if not anchor:
+        return ""
+    question = str(context.get("question", "")).strip()
+    parts = [anchor, *identity_facts[:2], question]
+    query = " ".join(part for part in parts if part)
+    query = re.sub(r"[<>]", " ", query)
+    query = re.sub(r"\s+", " ", query).strip()
+    return query[:600]
+
+
+def _json_object(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _public_tool_args(tool_args: Dict) -> Dict:
@@ -255,6 +347,47 @@ def _public_tool_args(tool_args: Dict) -> Dict:
         for key, value in tool_args.items()
         if key != "knowledge" and not str(key).startswith("__")
     }
+
+
+def _canonical_tool_call(tool_name: str, tool_args: Dict) -> str:
+    """Return a stable representation of a model-visible tool call."""
+    return json.dumps(
+        {"tool": tool_name, "args": _public_tool_args(tool_args)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _is_repeated_search_without_edit(env, tool_name: str, tool_args: Dict) -> bool:
+    """Reject an identical search until a graph edit changes knowledge state."""
+    if tool_name not in {"kb_search", "websearch"}:
+        return False
+
+    current = _canonical_tool_call(tool_name, tool_args)
+    for call in reversed(getattr(env, "tool_history", [])):
+        previous_name = call.get("tool")
+        if previous_name in {"insert", "update", "delete"}:
+            break
+        if previous_name not in {"kb_search", "websearch"}:
+            continue
+        previous = _canonical_tool_call(previous_name, call.get("args", {}))
+        if previous == current:
+            return True
+    return False
+
+
+def _duplicate_search_result(tool_name: str) -> str:
+    if tool_name == "websearch":
+        return (
+            "Duplicate websearch blocked: the identical query already ran and the graph has not changed. "
+            "Use its evidence now: make one justified insert/update/delete, answer directly if evidence is "
+            "already sufficient, or issue a materially different query."
+        )
+    return (
+        "Duplicate kb_search blocked: the identical query already ran and the graph has not changed. "
+        "Use the returned evidence, refine the query materially, or use websearch if the required fact is missing."
+    )
 
 def _parse_tool_result(result: str) -> Dict[str, Any]:
     """解析工具执行结果，提取结构化信息"""
@@ -519,6 +652,22 @@ def step(env: 'ToolEnv', action_text: str, step_number: int = None):
             reward=0
         )
         return result, env.PENALTY_FOR_INVALID, False, {"action_is_valid": True, "action_is_effective": False}
+
+    if _is_repeated_search_without_edit(env, tool_name, tool_args):
+        result = _duplicate_search_result(tool_name)
+        env.duplicate_search_count += 1
+        env._update_tracking_variables(
+            response=action_text,
+            action=action,
+            action_is_valid=True,
+            action_is_effective=False,
+            reward=-0.1,
+        )
+        return result, -0.1, False, {
+            "action_is_valid": True,
+            "action_is_effective": False,
+            "duplicate_search": True,
+        }
     
     # GraphR1工具直接操作图文件，不需要knowledge pipeline
     
@@ -728,6 +877,29 @@ def step_batch(envs: List['ToolEnv'], action_texts: List[str], step_numbers: Lis
             results[i] = (result, env.PENALTY_FOR_INVALID, False, {"action_is_valid": True, "action_is_effective": False})
             logger.error(f"[ERROR] Invalid arguments for tool: {result}")
             continue
+
+        if _is_repeated_search_without_edit(env, tool_name, tool_args):
+            result = _duplicate_search_result(tool_name)
+            env.steps_taken += 1
+            env.duplicate_search_count += 1
+            env._update_tracking_variables(
+                response=action_text,
+                action=action,
+                action_is_valid=True,
+                action_is_effective=False,
+                reward=-0.1,
+            )
+            results[i] = (
+                result,
+                -0.1,
+                False,
+                {
+                    "action_is_valid": True,
+                    "action_is_effective": False,
+                    "duplicate_search": True,
+                },
+            )
+            continue
             
         # Group by tool name
         if tool_name not in tool_groups:
@@ -924,6 +1096,10 @@ class ToolEnv:
             '<tool_call>{"tool": "<name>", "args": { ... }}</tool_call>\n\n'
             "When you have the final answer (no further tool calls are needed), use:\n"
             "`<think>`\nBrief reasoning and evidence\n`</think>`\n<answer>\nClear, direct answer\n</answer>\n\n"
+            "FINAL ANSWER CONTENT RULE: Inside the final answer tags, output only the shortest "
+            "answer span that directly answers the question (for example: `1758`, "
+            "`75 feet`, or `Finland`). Do not repeat the question, entity name, "
+            "explanation, or a full sentence unless the answer itself requires it.\n\n"
         )
         
         # 根据可用工具动态添加优先级提示
@@ -939,11 +1115,11 @@ class ToolEnv:
         else:
             # Ablation版本：仅包含搜索工具
             template += (
-                "Retrieval and tool priority (strict):\n"
-                '1) Visual grounding: Start with kb_search({"query":"<img>"}) to retrieve candidate entities. Take the top-ranked visual entity as the anchor.\n'
-                "2) Factual lookup: Form a text query using the anchoring entity name and question cues, then call kb_search. Prefer multiple rounds of refined text kb_search to gather sufficient evidence.\n"
-                "3) Fallback: Use websearch only when refined kb_search attempts remain clearly insufficient, irrelevant, missing key knowledge, or conflicting.\n"
-                "4) Focus on providing accurate answers based on available information.\n"
+                "Required retrieval state machine:\n"
+                '1) Visual grounding is performed first with kb_search({"query":"<img>"}).\n'
+                "2) After visual candidates are returned, you MUST call kb_search again with a natural-language text query combining the best candidate entity and the original question.\n"
+                "3) After text evidence is returned, answer immediately with one <answer>...</answer> block.\n"
+                "4) The only available tool is kb_search. Never call web_search, websearch, text_search, or any unlisted tool.\n"
             )
         
         return template
@@ -953,6 +1129,7 @@ class ToolEnv:
         self.reward = 0
         self.tool_history = []  # Record tool call history
         self.steps_taken = 0
+        self.duplicate_search_count = 0
         self._actions = []  # All actions (including all LLM responses)
         self._actions_valid = []  # Correctly formatted actions
         self._actions_effective = []  # Effectively executed actions
@@ -965,6 +1142,7 @@ class ToolEnv:
             "reward": self.reward,
             "steps_taken": self.steps_taken,
             "tool_history": self.tool_history,
+            "duplicate_search_count": self.duplicate_search_count,
             "actions": self._actions,
             "actions_valid": self._actions_valid,
             "actions_effective": self._actions_effective,
@@ -1198,6 +1376,7 @@ class ToolEnv:
         env.tool_history = deepcopy(self.tool_history)
         env.reward = self.reward
         env.steps_taken = self.steps_taken
+        env.duplicate_search_count = self.duplicate_search_count
         env._actions = deepcopy(self._actions)
         env._actions_valid = deepcopy(self._actions_valid)
         env._actions_effective = deepcopy(self._actions_effective)

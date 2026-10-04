@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from functools import partial
 import hashlib
 import json
 import math
@@ -47,7 +48,16 @@ GRAPHR1_WIKI_BATCH_TARGET_CHARS = 12000
 GRAPHR1_INSERT_BATCH_SIZE = 50
 GRAPHR1_INSERT_MAX_RETRIES = 50
 GRAPHR1_INSERT_RETRY_DELAY_SECONDS = 10
-GRAPHR1_TEXT_LLM_MODEL = "openai/gpt-4o-mini"
+GRAPHR1_TEXT_LLM_MODEL = "gpt-4o-mini"
+
+
+def resolve_graph_llm_model() -> str:
+    """Resolve the graph-construction model with legacy fallback support."""
+    return (
+        os.getenv("GRAPH_LLM_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or GRAPHR1_TEXT_LLM_MODEL
+    )
 
 
 def _positive_limit_arg(value: str) -> int:
@@ -134,6 +144,7 @@ def run_build(
     limit: int | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    graph_llm_model = resolve_graph_llm_model()
     layout = build_layout(
         root=root,
         dataset=dataset,
@@ -297,7 +308,7 @@ def run_build(
             "protected_path_violations": [],
             "encoder_mode": encoder_mode,
             "embedding_batch_size": embedding_batch_size,
-            "text_graph_llm": GRAPHR1_TEXT_LLM_MODEL,
+            "text_graph_llm": graph_llm_model,
             "mock_llm": bool(mock_encoder or mock_llm),
             "text_graph_reused": text_graph_reused,
             "text_graph_indexes_reused": text_graph_indexes_reused,
@@ -320,7 +331,7 @@ def run_build(
             "missing_images": row_quality["missing_images"],
             "missing_fields": row_quality["missing_fields"],
             "embedding_batch_size": embedding_batch_size,
-            "text_graph_llm": GRAPHR1_TEXT_LLM_MODEL,
+            "text_graph_llm": graph_llm_model,
             "mock_llm": bool(mock_encoder or mock_llm),
             "text_graph_reused": text_graph_reused,
             "text_graph_indexes_reused": text_graph_indexes_reused,
@@ -580,10 +591,19 @@ def build_text_graphr1_graph(
 
     _write_graphr1_seed_guard(output_dir)
     from graphr1.graphr1 import GraphR1
+    from graphr1.llm import openai_complete_if_cache
+
+    graph_llm_model = resolve_graph_llm_model()
 
     rag = GraphR1(
         working_dir=str(output_dir),
-        llm_model_name=GRAPHR1_TEXT_LLM_MODEL,
+        llm_model_name=graph_llm_model,
+        llm_model_func=partial(
+            openai_complete_if_cache,
+            graph_llm_model,
+            api_key=os.getenv("OPENAI_API_KEY") or None,
+            base_url=os.getenv("OPENAI_BASE_URL") or None,
+        ),
     )
     _insert_graphr1_batches(rag, contents)
 

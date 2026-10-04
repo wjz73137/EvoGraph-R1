@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Iterable, Mapping
 from io import BytesIO
 from pathlib import Path, PureWindowsPath
@@ -22,9 +23,46 @@ GENERATION_NON_TENSOR_KEYS = (
 )
 
 
-def process_image(image: Any, max_pixels: int = 672 * 672 * 2, min_pixels: int = 512 * 512):
+DEFAULT_MAX_IMAGE_PIXELS = 672 * 672 * 2
+DEFAULT_MIN_IMAGE_PIXELS = 512 * 512
+
+
+def _image_pixel_limit(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def process_image(
+    image: Any,
+    max_pixels: int | None = None,
+    min_pixels: int | None = None,
+):
     """Normalize a dataset image to an RGB PIL image."""
     from PIL import Image
+
+    if max_pixels is None:
+        max_pixels = _image_pixel_limit(
+            "EVOGRAPH_MM_MAX_IMAGE_PIXELS",
+            DEFAULT_MAX_IMAGE_PIXELS,
+        )
+    if min_pixels is None:
+        min_pixels = _image_pixel_limit(
+            "EVOGRAPH_MM_MIN_IMAGE_PIXELS",
+            DEFAULT_MIN_IMAGE_PIXELS,
+        )
+    if min_pixels > max_pixels:
+        raise ValueError(
+            "EVOGRAPH_MM_MIN_IMAGE_PIXELS cannot exceed "
+            "EVOGRAPH_MM_MAX_IMAGE_PIXELS"
+        )
 
     if isinstance(image, Mapping) and "bytes" in image:
         image = Image.open(BytesIO(image["bytes"]))

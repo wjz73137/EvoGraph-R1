@@ -74,13 +74,15 @@ def _add_ai_metadata_to_hyperedge(hyperedge_data: dict, action: str, tool_name: 
         timestamp = datetime.now().isoformat()
 
         # 获取AI模型信息 - 优先使用环境变量，按优先级依次尝试
-        # 1. OPENAI_MODEL (OpenAI)
-        # 2. SILICONFLOW_MODEL (SiliconFlow)
-        # 3. ZHIPU_MODEL (智谱AI)
-        # 4. global_config.llm_model_name
-        # 5. AI_MODEL_NAME (通用)
-        # 6. 默认值
+        # 1. GRAPH_LLM_MODEL (graph construction/editing)
+        # 2. OPENAI_MODEL (legacy OpenAI-compatible fallback)
+        # 3. SILICONFLOW_MODEL (SiliconFlow)
+        # 4. ZHIPU_MODEL (智谱AI)
+        # 5. global_config.llm_model_name
+        # 6. AI_MODEL_NAME (通用)
+        # 7. 默认值
         ai_model = (
+            os.getenv("GRAPH_LLM_MODEL") or
             os.getenv("OPENAI_MODEL") or
             os.getenv("SILICONFLOW_MODEL") or
             os.getenv("ZHIPU_MODEL") or
@@ -152,6 +154,7 @@ def _add_ai_metadata_to_entity(entity_data: dict, action: str, tool_name: str, g
 
         # 获取AI模型信息 - 优先使用环境变量，按优先级依次尝试
         ai_model = (
+            os.getenv("GRAPH_LLM_MODEL") or
             os.getenv("OPENAI_MODEL") or
             os.getenv("SILICONFLOW_MODEL") or
             os.getenv("ZHIPU_MODEL") or

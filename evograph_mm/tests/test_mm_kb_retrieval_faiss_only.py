@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from evograph_mm.kb.retrieval import MMKBRetriever
+from evograph_mm.kb.retrieval import MMKBRetriever, _merge_anchor_local_hyperedges
 
 
 faiss = pytest.importorskip("faiss")
@@ -177,3 +177,113 @@ def test_retriever_uses_bge_and_faiss_without_runtime_gme(tmp_path, monkeypatch)
     )[0]
     assert "error" not in image_payload
     assert image_payload["results"][0]["entity"] == "Target Entity"
+
+
+def test_runtime_gme_text_queries_are_encoded_as_one_batch(tmp_path, monkeypatch):
+    _build_minimal_kb(tmp_path)
+    monkeypatch.setenv("EVOGRAPH_MM_ENABLE_BGE_TEXT", "0")
+
+    class CountingEncoder:
+        def __init__(self):
+            self.calls = []
+
+        def encode_texts(self, texts, instruction=None):
+            values = list(texts)
+            self.calls.append((values, instruction))
+            vectors = np.zeros((len(values), 4), dtype=np.float32)
+            vectors[:, 0] = 1.0
+            return vectors
+
+    encoder = CountingEncoder()
+    retriever = MMKBRetriever(
+        working_dir=tmp_path,
+        model_path=tmp_path,
+        encoder_factory=lambda *args, **kwargs: encoder,
+        dataset="E-VQA",
+        subset="unit",
+    )
+    status = retriever.load()
+
+    assert status["status"] == "ready"
+    payloads = retriever.search(
+        queries=["first", "second", "first"],
+        rag_top_k=0,
+        entity_top_k=1,
+        hyperedge_top_k=0,
+    )
+
+    assert len(payloads) == 3
+    assert all("error" not in payload for payload in payloads)
+    assert len(encoder.calls) == 1
+    assert encoder.calls[0][0] == ["first", "second"]
+
+
+def test_retriever_reload_reuses_runtime_encoder(tmp_path, monkeypatch):
+    _build_minimal_kb(tmp_path)
+    monkeypatch.setenv("EVOGRAPH_MM_ENABLE_BGE_TEXT", "0")
+    encoder = object()
+    factory_calls = []
+
+    def factory(*args, **kwargs):
+        factory_calls.append((args, kwargs))
+        return encoder
+
+    retriever = MMKBRetriever(
+        working_dir=tmp_path,
+        model_path=tmp_path,
+        encoder_factory=factory,
+        dataset="E-VQA",
+        subset="unit",
+    )
+    assert retriever.load()["status"] == "ready"
+    assert retriever.encoder is encoder
+    assert len(factory_calls) == 1
+
+    assert retriever.load(reusable_encoder=encoder)["status"] == "ready"
+    assert retriever.encoder is encoder
+    assert len(factory_calls) == 1
+
+
+def test_anchor_local_hyperedges_precede_global_semantic_hits():
+    entity_results = [
+        {"id": '"NAPLES"'},
+        {"id": '"SANTI FILIPPO E GIACOMO"'},
+    ]
+    global_fact = {"id": '<hyperedge>"Another church was built in 1772."'}
+    local_fact = {
+        "id": '<hyperedge>"The current church is the product of a 1758 reconstruction."'
+    }
+    sidecar = {
+        "entity": {
+            '"NAPLES"': {"wikipedia_urls": ["wiki:naples"]},
+            '"SANTI FILIPPO E GIACOMO"': {"wikipedia_urls": ["wiki:santi"]},
+        },
+        "hyperedge": {
+            global_fact["id"]: {"wikipedia_urls": ["wiki:other"]},
+            local_fact["id"]: {"wikipedia_urls": ["wiki:santi"]},
+        },
+    }
+
+    results = _merge_anchor_local_hyperedges(
+        query="Santi Filippo e Giacomo, Naples When was this church built?",
+        entity_results=entity_results,
+        hyperedge_candidates=[global_fact, local_fact],
+        source_sidecar=sidecar,
+        top_k=2,
+    )
+
+    assert results == [local_fact, global_fact]
+
+
+def test_anchor_local_hyperedges_fall_back_for_unanchored_query():
+    candidates = [{"id": "global-1"}, {"id": "global-2"}]
+
+    results = _merge_anchor_local_hyperedges(
+        query="When was it built?",
+        entity_results=[{"id": '"SANTI FILIPPO E GIACOMO"'}],
+        hyperedge_candidates=candidates,
+        source_sidecar={"entity": {}, "hyperedge": {}},
+        top_k=1,
+    )
+
+    assert results == candidates[:1]

@@ -108,6 +108,14 @@ def _batch_context_value(non_tensor_batch, key, index):
     return value
 
 
+def _batch_tensor_int(batch, key, index):
+    values = batch.get(key)
+    if values is None:
+        return 0
+    value = values[index]
+    return int(value.item()) if hasattr(value, "item") else int(value)
+
+
 def _batch_extra_info_value(non_tensor_batch, index, key):
     extra_info = _batch_context_value(non_tensor_batch, "extra_info", index)
     if isinstance(extra_info, dict):
@@ -127,9 +135,18 @@ def _normalize_context_image_path(value):
         return value
 
 
-def _copy_envs_with_batch_context(template_env, batch):
+def _configured_mm_api_urls(env_name):
+    return [
+        value.strip()
+        for value in os.getenv(env_name, "").split(",")
+        if value.strip()
+    ]
+
+
+def _copy_envs_with_batch_context(template_env, batch, *, api_urls_env=None):
     envs = []
     non_tensor_batch = getattr(batch, "non_tensor_batch", {}) or {}
+    api_urls = _configured_mm_api_urls(api_urls_env) if api_urls_env else []
     for index in range(len(batch)):
         env = template_env.copy()
         set_context = getattr(env, "set_tool_context", None)
@@ -146,6 +163,8 @@ def _copy_envs_with_batch_context(template_env, batch):
                     or _batch_extra_info_value(non_tensor_batch, index, "image_path")
                 ),
                 question=_batch_extra_info_value(non_tensor_batch, index, "question"),
+                mm_search_api_url=(api_urls[index % len(api_urls)] if api_urls else None),
+                trajectory_index=index,
             )
         envs.append(env)
     return envs
@@ -365,6 +384,17 @@ def compute_data_metrics(batch, use_critic=True):
     answer_f1_scores = batch.batch['answer_f1_scores'].float()
     answer_em_scores = batch.batch['answer_em_scores'].float()
     turns = batch.batch['turns'].float()
+    trajectory_metric_names = (
+        "duplicate_search_count",
+        "successful_graph_edit_count",
+        "verified_graph_edit_count",
+        "websearch_count",
+    )
+    trajectory_metrics = {
+        f"trajectory/{name}/mean": batch.batch[name].float().mean().detach().item()
+        for name in trajectory_metric_names
+        if name in batch.batch
+    }
     metrics = {
         # score
         'critic/score/mean':
@@ -422,6 +452,8 @@ def compute_data_metrics(batch, use_critic=True):
         'turns/mean': torch.mean(turns).detach().item(),
         'turns/max': torch.max(turns).detach().item(),
         'turns/min': torch.min(turns).detach().item(),
+
+        **trajectory_metrics,
 
         # response length
         'response_length/mean':
@@ -557,7 +589,7 @@ class RayPPOTrainer(object):
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
         # 1. Check total batch size for data correctness
-        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
+        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n_repeat
         assert real_train_batch_size % n_gpus == 0, \
             f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
 
@@ -869,6 +901,7 @@ class RayPPOTrainer(object):
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
             max_tool_response_length=self.config.data.max_tool_response_length,
+            max_turn_response_length=self.config.tool.get('max_turn_response_length'),
             num_gpus=self.config.trainer.n_gpus_per_node,
             use_batch_tool_calls=self.config.tool.use_batch_tool_calls,
             tool_call_start=self.config.tool.tool_call_start,
@@ -876,6 +909,10 @@ class RayPPOTrainer(object):
             tool_response_start=self.config.tool.tool_response_start,
             tool_response_end=self.config.tool.tool_response_end,
             tool_custom_response_template=self.config.tool.tool_custom_response_template,
+            response_guidance=self.config.tool.get('response_guidance', False),
+            force_graph_edit_verification=self.config.tool.get(
+                'force_graph_edit_verification', False
+            ),
         )
 
         # Agent config preparation
@@ -890,7 +927,11 @@ class RayPPOTrainer(object):
             timing_raw = {}
             test_batch: DataProto = DataProto.from_single_dict(batch_dict)
             # test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
-            envs = _copy_envs_with_batch_context(self.val_env, test_batch)
+            envs = _copy_envs_with_batch_context(
+                self.val_env,
+                test_batch,
+                api_urls_env="MM_VAL_SEARCH_API_URLS",
+            )
             
             test_gen_batch = self._pop_generation_batch(test_batch)
             test_gen_batch.meta_info = {
@@ -940,6 +981,18 @@ class RayPPOTrainer(object):
                        "answer_em_score": answer_lst_em[i],
                        "format_score": format_lst[i],
                        "turns": int(test_batch.batch['turns'][i]),
+                       "duplicate_search_count": _batch_tensor_int(
+                           test_batch.batch, "duplicate_search_count", i
+                       ),
+                       "successful_graph_edit_count": _batch_tensor_int(
+                           test_batch.batch, "successful_graph_edit_count", i
+                       ),
+                       "verified_graph_edit_count": _batch_tensor_int(
+                           test_batch.batch, "verified_graph_edit_count", i
+                       ),
+                       "websearch_count": _batch_tensor_int(
+                           test_batch.batch, "websearch_count", i
+                       ),
                     }
                    for i, result in enumerate(result_lst) 
                 ]
@@ -965,6 +1018,15 @@ class RayPPOTrainer(object):
         data_source_answer_em = {}
         data_source_format = {}
         data_source_turns = {}
+        data_source_trajectory_metrics = {
+            name: {}
+            for name in (
+                "duplicate_search_count",
+                "successful_graph_edit_count",
+                "verified_graph_edit_count",
+                "websearch_count",
+            )
+        }
         for i in range(reward_tensor.shape[0]):
             data_source = data_sources[i]
             if data_source not in data_source_reward:
@@ -982,6 +1044,12 @@ class RayPPOTrainer(object):
             if data_source not in data_source_turns:
                 data_source_turns[data_source] = []
             data_source_turns[data_source].append(turns_tensor[i])
+            for name, values_by_source in data_source_trajectory_metrics.items():
+                if name not in test_batch.batch:
+                    continue
+                values_by_source.setdefault(data_source, []).append(
+                    _batch_tensor_int(test_batch.batch, name, i)
+                )
         
         metric_dict = {}
         for data_source, rewards in data_source_reward.items():
@@ -994,6 +1062,9 @@ class RayPPOTrainer(object):
             metric_dict[f'val/format_score/{data_source}'] = np.mean(formats)
         for data_source, turns in data_source_turns.items():
             metric_dict[f'val/turns/{data_source}'] = np.mean(turns)
+        for name, values_by_source in data_source_trajectory_metrics.items():
+            for data_source, values in values_by_source.items():
+                metric_dict[f'val/{name}/{data_source}'] = np.mean(values)
             
         # save the results to a file
         result_save_file = f'expr_results/{self.config.trainer.experiment_name}/evals_step{self.global_steps}.json'
@@ -1153,9 +1224,15 @@ class RayPPOTrainer(object):
         # load dataloader,
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
-        if os.path.exists(dataloader_local_path):
+        reset_dataloader = self.config.trainer.get('reset_dataloader_on_resume', False)
+        if os.path.exists(dataloader_local_path) and not reset_dataloader:
             dataloader_state_dict = torch.load(dataloader_local_path)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
+        elif reset_dataloader:
+            print(
+                "Resetting dataloader state for the new training dataset while "
+                "retaining model and optimizer checkpoint state"
+            )
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
@@ -1231,6 +1308,7 @@ class RayPPOTrainer(object):
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
             max_tool_response_length=self.config.data.max_tool_response_length,
+            max_turn_response_length=self.config.tool.get('max_turn_response_length'),
             num_gpus=self.config.trainer.n_gpus_per_node,
             use_batch_tool_calls=self.config.tool.use_batch_tool_calls,
             tool_call_start=self.config.tool.tool_call_start,
@@ -1238,6 +1316,10 @@ class RayPPOTrainer(object):
             tool_response_start=self.config.tool.tool_response_start,
             tool_response_end=self.config.tool.tool_response_end,
             tool_custom_response_template=self.config.tool.tool_custom_response_template,
+            response_guidance=self.config.tool.get('response_guidance', False),
+            force_graph_edit_verification=self.config.tool.get(
+                'force_graph_edit_verification', False
+            ),
         )
 
         generation_manager = ToolGenerationManager(
@@ -1265,7 +1347,11 @@ class RayPPOTrainer(object):
                 )
 
                 # 3. Create corresponding number of environments
-                envs = _copy_envs_with_batch_context(self.env, batch)
+                envs = _copy_envs_with_batch_context(
+                    self.env,
+                    batch,
+                    api_urls_env="MM_TRAIN_SEARCH_API_URLS",
+                )
 
                 # 4. Prepare data needed for generation
                 gen_batch = self._pop_generation_batch(batch)
@@ -1371,7 +1457,7 @@ class RayPPOTrainer(object):
                                                   adv_estimator=self.config.algorithm.adv_estimator,
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
-                                                  num_repeat=self.config.actor_rollout_ref.rollout.n)
+                                                  num_repeat=self.config.actor_rollout_ref.rollout.n_repeat)
 
                     # update critic
                     if self.use_critic:

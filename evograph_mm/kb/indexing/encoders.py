@@ -218,7 +218,18 @@ class GMEQwen2VLEncoder:
                 f"{GME_MODEL_REPO_ID}; loading is local_files_only=True. "
                 "No download or Hugging Face access is attempted by this loader."
             )
+        native_requested = False
         try:
+            # The provider's remote code explicitly refuses Transformers >=4.52.
+            # Use a project-local adapter for the installed v5 module layout;
+            # never downgrade the shared environment or edit model snapshots.
+            from importlib.metadata import version
+            if int(version("transformers").split(".")[0]) >= 5:
+                native_requested = True
+                from .gme_compat import NativeGME
+                self.model = NativeGME(self.model_path, self.device, self.batch_size)
+                self._backend = "transformers-v5-native-gme"
+                return
             from sentence_transformers import SentenceTransformer
 
             model_kwargs = {
@@ -230,6 +241,10 @@ class GMEQwen2VLEncoder:
             self.model = SentenceTransformer(str(self.model_path), **model_kwargs)
             self._backend = "sentence-transformers"
         except Exception as exc:
+            if native_requested:
+                raise LocalModelUnavailable(
+                    f"Native GME compatibility loader failed for {self.model_path}: {exc}"
+                ) from exc
             try:
                 self.model = _load_gme_transformers_model(
                     self.model_path,
@@ -266,11 +281,17 @@ class GMEQwen2VLEncoder:
         instruction: str | None = None,
     ) -> np.ndarray:
         values = [str(image) for image in images]
-        prepared_images = _prepare_gme_images(values)
+        # SentenceTransformers sorts inputs before tokenization and expects dict values
+        # to have a length. Keep image paths as strings for that backend; the model's
+        # own fetch_image routine opens them during tokenization.
         if self._backend == "sentence-transformers":
             return self._encode_sentence_transformers(
-                [{"image": image} for image in prepared_images]
+                [{"image": image} for image in values]
             )
+        prepared_images = _prepare_gme_images(values)
+        if self._backend == "transformers-v5-native-gme":
+            output = self.model.get_image_embeddings(prepared_images, instruction=instruction)
+            return _truncate_and_normalize(_as_2d_float32(output), self.embedding_dim)
         return self._encode_transformers_images(prepared_images)
 
     def encode_fused(
@@ -279,6 +300,12 @@ class GMEQwen2VLEncoder:
         instruction: str | None = None,
     ) -> np.ndarray:
         payloads = [_fused_payload(item, instruction) for item in items]
+        if self._backend == "transformers-v5-native-gme":
+            output = self.model.get_fused_embeddings(
+                [item["text"] for item in payloads],
+                [item["image"] for item in payloads], instruction=instruction,
+            )
+            return _truncate_and_normalize(_as_2d_float32(output), self.embedding_dim)
         if self._backend == "sentence-transformers":
             return self._encode_sentence_transformers(
                 [

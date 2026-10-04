@@ -257,9 +257,15 @@ class GraphR1BaseTool(Tool):
                 }
 
                 # Get LLM model name
-                llm_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+                llm_model = (
+                    os.getenv("GRAPH_LLM_MODEL")
+                    or os.getenv("OPENAI_MODEL")
+                    or "gpt-4o-mini"
+                )
                 if os.getenv("SILICONFLOW_API_KEY"):
-                    llm_model = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+                    llm_model = os.getenv("GRAPH_LLM_MODEL") or os.getenv(
+                        "SILICONFLOW_MODEL", "Qwen/Qwen2.5-7B-Instruct"
+                    )
                 graphr1_config["llm_model_name"] = llm_model
 
                 # Check for API keys
@@ -272,13 +278,19 @@ class GraphR1BaseTool(Tool):
                     from graphr1.llm import openai_complete_if_cache
                     from functools import wraps
 
-                    llm_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+                    llm_model = (
+                        os.getenv("GRAPH_LLM_MODEL")
+                        or os.getenv("OPENAI_MODEL")
+                        or "gpt-4o-mini"
+                    )
                     llm_base_url = os.getenv("OPENAI_BASE_URL", "")
 
                     if siliconflow_key:
                         llm_api_key = siliconflow_key
                         llm_base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-                        llm_model = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+                        llm_model = os.getenv("GRAPH_LLM_MODEL") or os.getenv(
+                            "SILICONFLOW_MODEL", "Qwen/Qwen2.5-7B-Instruct"
+                        )
                         logger.info(f"[ENV] Using SiliconFlow LLM: {llm_model}")
                     elif zhipu_key:
                         logger.info(f"[ENV] Using Zhipu AI LLM")
@@ -731,6 +743,7 @@ class GraphR1BaseTool(Tool):
 
         if not global_config.get("llm_model_name"):
             global_config["llm_model_name"] = (
+                os.getenv("GRAPH_LLM_MODEL") or
                 os.getenv("OPENAI_MODEL") or
                 os.getenv("SILICONFLOW_MODEL") or
                 os.getenv("ZHIPU_MODEL") or

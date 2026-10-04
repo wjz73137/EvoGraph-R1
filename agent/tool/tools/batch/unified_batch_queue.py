@@ -780,7 +780,8 @@ class UnifiedBatchQueue:
     @staticmethod
     def _get_global_config() -> Dict:
         model_name = (
-            os.getenv("OPENAI_MODEL")
+            os.getenv("GRAPH_LLM_MODEL")
+            or os.getenv("OPENAI_MODEL")
             or os.getenv("SILICONFLOW_MODEL")
             or os.getenv("ZHIPU_MODEL")
             or os.getenv("AI_MODEL_NAME")

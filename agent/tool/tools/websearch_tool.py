@@ -36,6 +36,7 @@ class WebSearchTool(Tool):
 
     def __init__(self):
         super().__init__(self.name, self.description, self.parameters)
+        self._load_project_env()
         self.cache_enabled = self._read_cache_enabled()
         self.cache_path = self._resolve_cache_path()
         self.fuzzy_enabled = self._read_fuzzy_enabled()
@@ -47,6 +48,16 @@ class WebSearchTool(Tool):
             cache_ready = self._ensure_cache_db(self.cache_path)
             if cache_ready and self.fuzzy_enabled:
                 self._load_token_index(self.cache_path)
+
+    @staticmethod
+    def _load_project_env() -> None:
+        """Load project-local API settings without overriding process choices."""
+        try:
+            from dotenv import load_dotenv
+        except ImportError:
+            return
+        project_root = Path(__file__).resolve().parents[3]
+        load_dotenv(project_root / ".env", override=False)
 
     def execute(self, args: Dict) -> str:
         """
@@ -65,8 +76,10 @@ class WebSearchTool(Tool):
 
         try:
             if self.cache_enabled:
-                return self._search_with_cache(query, self._dataset_from_args(args))
-            return self._jina_search(query)
+                result = self._search_with_cache(query, self._dataset_from_args(args))
+            else:
+                result = self._jina_search(query)
+            return self._augment_with_wikipedia(query, result)
         except sqlite3.Error as e:
             error_msg = f"Websearch cache failed before Jina fallback: {str(e)}"
             return json.dumps({"error": error_msg}, ensure_ascii=False)
@@ -510,7 +523,7 @@ class WebSearchTool(Tool):
         """
         jina_api_key = os.getenv("JINA_API_KEY")
         if not jina_api_key:
-            raise ValueError("JINA_API_KEY environment variable is not set")
+            return self._dashscope_search(query)
 
         url = "https://s.jina.ai/"
         headers = {
@@ -523,6 +536,136 @@ class WebSearchTool(Tool):
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         return self._extract_title_and_description(response.text, 5)
+
+    def _augment_with_wikipedia(self, query: str, primary: str) -> str:
+        enabled = os.getenv("WEBSEARCH_WIKIPEDIA_AUGMENT", "false").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            return primary
+        try:
+            evidence = self._wikipedia_search(query)
+        except Exception as exc:
+            logger.warning("[WEBSEARCH_WIKIPEDIA] augmentation failed: %s", exc)
+            return primary
+        if not evidence:
+            return primary
+        # Put entity-resolved source text first so it survives tool-response
+        # truncation and is not overshadowed by a same-name search snippet.
+        sections = [value.strip() for value in (evidence, primary) if value and value.strip()]
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _wikipedia_search(query: str) -> str:
+        """Return public Wikipedia evidence for an entity-first search query."""
+        api_url = "https://en.wikipedia.org/w/api.php"
+        headers = {"User-Agent": "EvoGraph-R1 research/1.0"}
+        tokens = query.split()
+        candidates = [query]
+        candidates.extend(
+            " ".join(tokens[:length])
+            for length in range(len(tokens) - 1, 1, -1)
+        )
+        title = ""
+        seen = set()
+        for candidate in candidates:
+            candidate = candidate.strip().strip('"')
+            if not candidate or candidate.casefold() in seen:
+                continue
+            seen.add(candidate.casefold())
+            response = requests.get(
+                api_url,
+                params={
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": candidate,
+                    "srlimit": 3,
+                    "format": "json",
+                    "formatversion": 2,
+                },
+                headers=headers,
+                timeout=30,
+            )
+            response.raise_for_status()
+            results = response.json().get("query", {}).get("search", [])
+            if results and isinstance(results[0], dict):
+                title = str(results[0].get("title", "")).strip()
+                if title:
+                    break
+        if not title:
+            return ""
+
+        response = requests.get(
+            api_url,
+            params={
+                "action": "query",
+                "titles": title,
+                "prop": "extracts",
+                "explaintext": 1,
+                "format": "json",
+                "formatversion": 2,
+            },
+            headers=headers,
+            timeout=30,
+        )
+        response.raise_for_status()
+        pages = response.json().get("query", {}).get("pages", [])
+        if not pages or not isinstance(pages[0], dict):
+            return ""
+        extract = str(pages[0].get("extract", "")).strip()
+        if not extract:
+            return ""
+        return f"Wikipedia evidence [{title}]: {extract[:2500]}"
+
+    def _dashscope_search(self, query: str) -> str:
+        """Use the configured DashScope-compatible model's built-in web search."""
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        base_url = os.getenv("OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE", "")).strip()
+        model = (
+            os.getenv("WEBSEARCH_MODEL", "").strip()
+            or os.getenv("QUALITY_JUDGE_MODEL", "").strip()
+            or os.getenv("OPENAI_MODEL", "").strip()
+        )
+        missing = [
+            name
+            for name, value in (
+                ("OPENAI_API_KEY", api_key),
+                ("OPENAI_BASE_URL", base_url),
+                ("WEBSEARCH_MODEL/QUALITY_JUDGE_MODEL/OPENAI_MODEL", model),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "JINA_API_KEY is not set and DashScope search is not configured: "
+                + ", ".join(missing)
+            )
+
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Use web search to answer the query with compact factual evidence. "
+                        "Return at most five short evidence items. Preserve exact names, "
+                        "dates, measurements, and source titles when available. Do not "
+                        "include chain-of-thought or unsupported guesses."
+                    ),
+                },
+                {"role": "user", "content": query},
+            ],
+            temperature=0,
+            extra_body={
+                "enable_search": True,
+                "search_options": {"forced_search": True},
+            },
+        )
+        content = completion.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("DashScope web search returned empty content")
+        return content.strip()
 
     def _extract_title_and_description(self, text: str, max_results: int) -> str:
         """

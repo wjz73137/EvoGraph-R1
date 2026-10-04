@@ -61,6 +61,14 @@ class DataParallelPPOActor(BasePPOActor):
             self.processor = hf_processor(model_local_path)
 
         self.compute_entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
+        self.entropy_chunk_size = int(self.config.get('entropy_chunk_size', 0) or 0)
+        self.empty_cache_before_backward = bool(
+            self.config.get('empty_cache_before_backward', False)
+        )
+        if self.entropy_chunk_size > 0:
+            print(f'Actor entropy_chunk_size={self.entropy_chunk_size}')
+        if self.empty_cache_before_backward:
+            print('Actor empty_cache_before_backward=True')
 
     def _forward_micro_batch(self, micro_batch, temperature) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -120,7 +128,13 @@ class DataParallelPPOActor(BasePPOActor):
                 logits_rmpad.div_(temperature)
 
                 # compute entropy
-                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                if self.entropy_chunk_size > 0:
+                    entropy_rmpad = verl_F.entropy_from_logits_chunked(
+                        logits_rmpad,
+                        chunk_size=self.entropy_chunk_size,
+                    )
+                else:
+                    entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                 log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
@@ -157,7 +171,13 @@ class DataParallelPPOActor(BasePPOActor):
                 logits.div_(temperature)
                 logits = logits[:, -response_length - 1:-1, :]  # (bsz, response_length, vocab_size)
                 log_probs = logprobs_from_logits(logits, micro_batch['responses'])
-                entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                if self.entropy_chunk_size > 0:
+                    entropy = verl_F.entropy_from_logits_chunked(
+                        logits,
+                        chunk_size=self.entropy_chunk_size,
+                    )
+                else:
+                    entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
 
             return entropy, log_probs
 
@@ -324,6 +344,8 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
+                    if self.empty_cache_before_backward:
+                        torch.cuda.empty_cache()
                     loss.backward()
 
                     data = {

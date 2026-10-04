@@ -20,12 +20,15 @@ def normalize_lookup_content(raw: str) -> str:
 def build_hyperedge_content_lookup(
     hyperedges_data: Dict,
     skip_deleted: bool = True,
+    skip_unsearchable: bool = False,
 ) -> Dict[str, str]:
     lookup: Dict[str, str] = {}
     for hyperedge_id, hyperedge_data in hyperedges_data.items():
         if not isinstance(hyperedge_data, dict):
             continue
         if skip_deleted and hyperedge_data.get("deleted", False):
+            continue
+        if skip_unsearchable and hyperedge_data.get("searchable", True) is False:
             continue
         raw_content = hyperedge_data.get("content") or hyperedge_data.get("hyperedge_name") or ""
         normalized_content = normalize_lookup_content(raw_content)
@@ -35,13 +38,21 @@ def build_hyperedge_content_lookup(
 
 
 def build_hyperedge_lookup_payload(hyperedges_data: Dict) -> Dict:
-    searchable_lookup = build_hyperedge_content_lookup(hyperedges_data, skip_deleted=False)
+    searchable_lookup = build_hyperedge_content_lookup(
+        hyperedges_data,
+        skip_deleted=False,
+        skip_unsearchable=True,
+    )
     return {
-        "version": 1,
+        "version": 2,
         "generated_at": datetime.now().isoformat(),
-        "active": build_hyperedge_content_lookup(hyperedges_data, skip_deleted=True),
+        "active": build_hyperedge_content_lookup(
+            hyperedges_data,
+            skip_deleted=True,
+            skip_unsearchable=True,
+        ),
         "searchable": searchable_lookup,
-        "all": searchable_lookup,
+        "all": build_hyperedge_content_lookup(hyperedges_data, skip_deleted=False),
     }
 
 
@@ -83,6 +94,8 @@ def iter_recent_active_contents(mutations: Iterable[Dict]) -> Iterable[str]:
         if not isinstance(mutation, dict):
             continue
         if not mutation.get("active", False):
+            continue
+        if mutation.get("searchable", True) is False:
             continue
         raw_content = mutation.get("content") or mutation.get("plain_content") or ""
         formatted = format_hyperedge_content(raw_content)
@@ -182,6 +195,6 @@ def select_lookup_section(
 ) -> Dict[str, str]:
     if not isinstance(lookup_payload, dict):
         return {}
-    section = "active" if skip_deleted else "all"
+    section = "active" if skip_deleted else ("searchable" if "searchable" in lookup_payload else "all")
     lookup = lookup_payload.get(section)
     return lookup if isinstance(lookup, dict) else {}

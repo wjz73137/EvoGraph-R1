@@ -48,6 +48,15 @@ class _DummyTokenizer:
     def encode(self, text, add_special_tokens=False):
         return list(range(len(text)))
 
+    def convert_tokens_to_ids(self, token):
+        return {
+            "<|vision_start|>": 10,
+            "<|image_pad|>": 11,
+            "<|vision_end|>": 12,
+        }.get(token, -1)
+
+    unk_token_id = -1
+
 
 class _DummyImageProcessor:
     merge_size = 1
@@ -188,3 +197,60 @@ def test_tool_generation_active_and_padding_keep_multimodal_non_tensors():
         {"image": ["image-a"]},
     ]
     assert output.batch["responses"].shape[0] == 2
+
+
+def test_final_vision_expansion_drops_only_complete_spans_and_matching_images():
+    class _VariableImageProcessor:
+        merge_size = 1
+
+        def __call__(self, images, return_tensors="pt"):
+            counts = [image.info["token_count"] for image in images]
+            return {
+                "image_grid_thw": torch.tensor(
+                    [[1, 1, count] for count in counts],
+                    dtype=torch.long,
+                )
+            }
+
+    def image_with_tokens(count):
+        image = Image.new("RGB", (4, 4))
+        image.info["token_count"] = count
+        return image
+
+    manager = ToolGenerationManager.__new__(ToolGenerationManager)
+    manager.tokenizer = _DummyTokenizer()
+    manager.image_processor = _VariableImageProcessor()
+    manager.config = SimpleNamespace(max_response_length=10)
+
+    # The response has two image placeholders.  After expansion their vision
+    # spans require 7 and 8 tokens, so both cannot fit in a 10-token response.
+    # The second span must disappear atomically together with its image.
+    prompts = torch.tensor([[0, 20, 10, 11, 12, 21]], dtype=torch.long)
+    responses = torch.tensor(
+        [[30, 10, 11, 12, 31, 10, 11, 12, 32]],
+        dtype=torch.long,
+    )
+    images = [
+        image_with_tokens(2),
+        image_with_tokens(5),
+        image_with_tokens(6),
+    ]
+    non_tensors = {
+        "multi_modal_data": np.array([{"image": images}], dtype=object),
+    }
+
+    new_prompts, new_responses, new_non_tensors = manager._expand_final_vision_tokens(
+        prompts,
+        responses,
+        non_tensors,
+    )
+
+    prompt_ids = new_prompts[0][new_prompts[0] != 0].tolist()
+    response_ids = new_responses[0][new_responses[0] != 0].tolist()
+    retained_images = list(new_non_tensors["multi_modal_data"][0]["image"])
+
+    assert len(manager._find_vision_spans(prompt_ids)) == 1
+    assert len(manager._find_vision_spans(response_ids)) == 1
+    assert response_ids.count(11) == 5
+    assert [image.info["token_count"] for image in retained_images] == [2, 5]
+    assert response_ids.count(10) == response_ids.count(12) == 1

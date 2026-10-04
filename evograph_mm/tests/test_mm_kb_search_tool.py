@@ -32,7 +32,27 @@ def test_image_query_sends_image_context():
     assert payload["queries"] == ["<img>"]
     assert payload["image_ids"] == ["52a183470c330a38"]
     assert payload["context_queries"] == ["What structure spirals around this stepwell?"]
-    assert payload["visual_entity_top_k"] == 3
+    assert payload["visual_entity_top_k"] == 5
+
+
+def test_image_query_keeps_id_with_path_for_query_cache(tmp_path):
+    image = tmp_path / "52a183470c330a38.jpg"
+    image.write_bytes(b"image")
+    tool = MMKBSearchTool()
+
+    payload = tool._build_single_payload(
+        {
+            "query": "<img>",
+            "image_id": "52a183470c330a38",
+            "image_path": str(image),
+            "context_query": "What structure spirals around this stepwell?",
+        },
+        "<img>",
+    )
+
+    assert payload["image_ids"] == ["52a183470c330a38"]
+    assert payload["image_paths"] == [str(image)]
+    assert payload["context_queries"] == ["What structure spirals around this stepwell?"]
 
 
 def test_image_query_normalizes_windows_dataset_path():
@@ -85,7 +105,7 @@ def test_batch_text_queries_do_not_send_image_context():
     }
 
 
-def test_image_response_returns_only_three_entities_with_images():
+def test_image_response_returns_only_five_entities_with_images():
     response = {
         "results": [
             {
@@ -104,7 +124,9 @@ def test_image_response_returns_only_three_entities_with_images():
     assert compact == (
         '{"results": [{"entity": "Entity 0", "image_path": "/tmp/entity-0.jpg"}, '
         '{"entity": "Entity 1", "image_path": "/tmp/entity-1.jpg"}, '
-        '{"entity": "Entity 2", "image_path": "/tmp/entity-2.jpg"}]}'
+        '{"entity": "Entity 2", "image_path": "/tmp/entity-2.jpg"}, '
+        '{"entity": "Entity 3", "image_path": "/tmp/entity-3.jpg"}, '
+        '{"entity": "Entity 4", "image_path": "/tmp/entity-4.jpg"}]}'
     )
 
 
@@ -138,3 +160,17 @@ def test_text_response_keeps_full_payload():
 
     assert "<knowledge>" in full
     assert "Willem de Kooning" in full
+
+
+def test_per_trajectory_api_url_overrides_default_route():
+    tool = MMKBSearchTool()
+    routed = {"query": "entity fact", "__mm_api_url": "http://127.0.0.1:8010/search"}
+
+    assert tool._api_url_for_query("entity fact", routed) == "http://127.0.0.1:8010/search"
+    groups = tool._group_indices_by_route_and_top_k_options(
+        [
+            routed,
+            {"query": "entity fact", "__mm_api_url": "http://127.0.0.1:8011/search"},
+        ]
+    )
+    assert len(groups) == 2

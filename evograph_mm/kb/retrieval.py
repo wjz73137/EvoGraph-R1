@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 import numpy as np
@@ -73,6 +74,7 @@ class MMKBRetriever:
     indexes: dict[str, LoadedVectorIndex] = field(init=False, default_factory=dict)
     bge_graph_indexes: LoadedBGEGraphIndexes | None = field(init=False, default=None)
     bge_graph_blockers: list[str] = field(init=False, default_factory=list)
+    unsearchable_knowledge: set[str] = field(init=False, default_factory=set)
     embedding_records: dict[str, dict[str, Any]] = field(init=False, default_factory=dict)
     query_fused_vectors: Any = field(init=False, default=None)
     query_fused_lookup: dict[tuple[str, str], int] = field(init=False, default_factory=dict)
@@ -86,7 +88,7 @@ class MMKBRetriever:
         self.working_dir = Path(self.working_dir)
         self.model_path = Path(self.model_path)
 
-    def load(self) -> dict[str, Any]:
+    def load(self, *, reusable_encoder: Any | None = None) -> dict[str, Any]:
         self._reset_runtime_state()
         self.last_reload_time = datetime.now(timezone.utc).isoformat()
 
@@ -132,6 +134,7 @@ class MMKBRetriever:
             "GraphR1 hit source sidecar",
         )
         self._load_query_fused_cache()
+        self.unsearchable_knowledge = self._load_unsearchable_knowledge()
 
         for name in ("entity", "hyperedge"):
             loaded = self._load_root_text_index(name)
@@ -146,7 +149,11 @@ class MMKBRetriever:
         self.embedding_records = self._build_embedding_record_map()
         self.bge_graph_indexes = self._load_or_build_bge_graph_indexes()
         if not self.blockers and self._runtime_encoder_enabled():
-            self.encoder = self._load_encoder()
+            self.encoder = (
+                reusable_encoder
+                if reusable_encoder is not None
+                else self._load_encoder()
+            )
             self.model_loaded = self.encoder is not None
 
         return self.status()
@@ -237,6 +244,33 @@ class MMKBRetriever:
             "context_queries",
         )
 
+        # Tool rollouts submit all active trajectories in one request.  Encode
+        # their text queries together so the comparatively expensive runtime
+        # GME fallback is paid once per tool turn rather than once per row.
+        # BGE-backed retrieval keeps its own query path and does not use this
+        # fallback cache.
+        runtime_text_vectors: dict[str, np.ndarray] = {}
+        if self.bge_graph_indexes is None and self.encoder is not None and (
+            rag_top_k > 0
+            or entity_top_k > 0
+            or hyperedge_top_k > 0
+            or entity_fusion_top_k > 0
+        ):
+            unique_text_queries = list(
+                dict.fromkeys(
+                    row.get("query", "")
+                    for row in rows
+                    if row.get("query", "")
+                    and row.get("query", "").strip() != IMAGE_QUERY_TOKEN
+                )
+            )
+            if unique_text_queries:
+                encoded = self.encoder.encode_texts(
+                    unique_text_queries,
+                    instruction=TEXT_QUERY_INSTRUCTION,
+                )
+                runtime_text_vectors = dict(zip(unique_text_queries, encoded))
+
         for row_index, row in enumerate(rows):
             query = row.get("query", "")
             context_query = context_query_values[row_index]
@@ -245,7 +279,11 @@ class MMKBRetriever:
             is_visual_entity_query = query.strip() == IMAGE_QUERY_TOKEN
             if image_id:
                 if image_id in self.image_to_text_lookup and not is_visual_entity_query:
-                    payloads.append({"results": self._image_to_text_results(image_id)})
+                    payloads.append(
+                        {"results": self._filter_unsearchable_results(
+                            self._image_to_text_results(image_id)
+                        )}
+                    )
                     continue
                 stored_image_path = image_path_by_id.get(image_id, "")
                 if stored_image_path:
@@ -329,7 +367,7 @@ class MMKBRetriever:
                         hyperedge_min_coherence=visual_hyperedge_min_coherence,
                     )
                 )
-                payloads.append({"results": results})
+                payloads.append({"results": self._filter_unsearchable_results(results)})
                 continue
 
             if query and (
@@ -359,10 +397,12 @@ class MMKBRetriever:
                             }
                         )
                         continue
-                    text_vector = self.encoder.encode_texts(
-                        [query],
-                        instruction=TEXT_QUERY_INSTRUCTION,
-                    )[0]
+                    text_vector = runtime_text_vectors.get(query)
+                    if text_vector is None:
+                        text_vector = self.encoder.encode_texts(
+                            [query],
+                            instruction=TEXT_QUERY_INSTRUCTION,
+                        )[0]
                     if "entity" in self.indexes or "hyperedge" in self.indexes:
                         entity_search_k = max(
                             entity_top_k,
@@ -444,7 +484,7 @@ class MMKBRetriever:
                 )[0]
                 results.extend(self._search_index("fused", vector, fused_top_k))
 
-            payloads.append({"results": results})
+            payloads.append({"results": self._filter_unsearchable_results(results)})
         return payloads
 
     def _reset_runtime_state(self) -> None:
@@ -460,6 +500,7 @@ class MMKBRetriever:
         self.indexes = {}
         self.bge_graph_indexes = None
         self.bge_graph_blockers = []
+        self.unsearchable_knowledge = set()
         self.embedding_records = {}
         self.query_fused_vectors = None
         self.query_fused_lookup = {}
@@ -468,6 +509,39 @@ class MMKBRetriever:
         self.model_loaded = False
         self.blockers = []
         self.last_reload_time = None
+
+    def _load_unsearchable_knowledge(self) -> set[str]:
+        hyperedges = self._read_optional_json(
+            self.working_dir / "kv_store_hyperedges.json",
+            "unsearchable hyperedges",
+        )
+        if not isinstance(hyperedges, dict):
+            return set()
+        return {
+            key
+            for record in hyperedges.values()
+            if isinstance(record, dict) and record.get("searchable", True) is False
+            if (key := _knowledge_filter_key(
+                record.get("content") or record.get("hyperedge_name") or ""
+            ))
+        }
+
+    def _filter_unsearchable_results(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not self.unsearchable_knowledge:
+            return results
+        filtered = []
+        for result in results:
+            if not isinstance(result, dict):
+                filtered.append(result)
+                continue
+            knowledge = result.get("<knowledge>") or result.get("contents") or ""
+            if _knowledge_filter_key(knowledge) in self.unsearchable_knowledge:
+                continue
+            filtered.append(result)
+        return filtered
 
     def _read_json(self, path: Path, label: str) -> dict[str, Any]:
         try:
@@ -689,6 +763,8 @@ class MMKBRetriever:
                 values = []
                 for hyperedge in hyperedges.values():
                     if not isinstance(hyperedge, dict):
+                        continue
+                    if hyperedge.get("searchable", True) is False:
                         continue
                     content = hyperedge.get("content") or hyperedge.get("hyperedge_name")
                     if isinstance(content, str) and content.strip():
@@ -953,7 +1029,11 @@ class MMKBRetriever:
         hyperedge_corpus = []
         if isinstance(hyperedges, dict):
             for hyperedge in hyperedges.values():
-                if not isinstance(hyperedge, dict) or hyperedge.get("deleted", False):
+                if (
+                    not isinstance(hyperedge, dict)
+                    or hyperedge.get("deleted", False)
+                    or hyperedge.get("searchable", True) is False
+                ):
                     continue
                 content = hyperedge.get("content") or hyperedge.get("hyperedge_name")
                 if isinstance(content, str) and content.strip():
@@ -1183,6 +1263,12 @@ class MMKBRetriever:
             candidate = payload.get("image_path") if isinstance(payload, dict) else None
             if isinstance(candidate, str) and str(Path(candidate).resolve(strict=False)) == normalized:
                 return image_id
+        # Dataset subsets may hold byte-identical copies under different directories.
+        # Their filenames are the stable image IDs, so reuse the indexed record instead
+        # of re-encoding the copied image on the retrieval service CPU.
+        basename_id = Path(image_path).stem
+        if basename_id in self.image_anchor_lookup:
+            return basename_id
         return None
 
     def _allows_missing_image_files(self) -> bool:
@@ -1277,9 +1363,15 @@ class MMKBRetriever:
                 query_vector,
                 int(max(0, entity_top_k)),
             )
+            # Keep a wider pool for provenance-local retrieval. Strict extraction
+            # can produce a correct pronoun-led fact whose extracted entities do
+            # not include the Wikipedia article subject. The source sidecar still
+            # records that relationship, so it can be recovered without changing
+            # graph contents.
+            hyperedge_candidate_top_k = max(int(max(0, hyperedge_top_k)), 1000)
             hyperedge_scores, hyperedge_hits = self.bge_graph_indexes.hyperedge_index.search(
                 query_vector,
-                int(max(0, hyperedge_top_k)),
+                hyperedge_candidate_top_k,
             )
         except Exception as exc:
             self.bge_graph_blockers.append(f"BGE graph query failed: {exc}")
@@ -1291,11 +1383,18 @@ class MMKBRetriever:
             scores=entity_scores[0].tolist() if len(entity_scores) else [],
             corpus=self.bge_graph_indexes.entity_corpus,
         )
-        hyperedge_results = self._format_bge_graph_hits(
+        hyperedge_candidates = self._format_bge_graph_hits(
             modality="bge_hyperedge",
             hits=hyperedge_hits[0].tolist() if len(hyperedge_hits) else [],
             scores=hyperedge_scores[0].tolist() if len(hyperedge_scores) else [],
             corpus=self.bge_graph_indexes.hyperedge_corpus,
+        )
+        hyperedge_results = _merge_anchor_local_hyperedges(
+            query=query,
+            entity_results=entity_results,
+            hyperedge_candidates=hyperedge_candidates,
+            source_sidecar=self.graphr1_hit_source_sidecar,
+            top_k=max(int(max(0, hyperedge_top_k)), int(max(0, rag_top_k))),
         )
         if rag_top_k > 0:
             graph_context = self._graphr1_context_results(
@@ -1858,6 +1957,80 @@ class MMKBRetriever:
 
 def _optional_string(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _match_text(value: Any) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+def _knowledge_filter_key(value: Any) -> str:
+    text = re.sub(r"^\s*<hyperedge>\s*", "", str(value or ""), flags=re.IGNORECASE)
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1]
+    return " ".join(text.casefold().split())
+
+
+def _merge_anchor_local_hyperedges(
+    *,
+    query: str,
+    entity_results: list[dict[str, Any]],
+    hyperedge_candidates: list[dict[str, Any]],
+    source_sidecar: dict[str, Any],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Prefer facts sourced from the longest entity explicitly named in a query."""
+    if top_k <= 0:
+        return []
+    query_text = _match_text(query)
+    entity_sidecar = source_sidecar.get("entity", {})
+    hyperedge_sidecar = source_sidecar.get("hyperedge", {})
+    if not isinstance(entity_sidecar, dict) or not isinstance(hyperedge_sidecar, dict):
+        return hyperedge_candidates[:top_k]
+
+    matches: list[tuple[int, str]] = []
+    for result in entity_results:
+        entity_id = _optional_string(result.get("id"))
+        entity_text = _match_text(entity_id)
+        if entity_id is not None and len(entity_text) >= 3 and entity_text in query_text:
+            matches.append((len(entity_text), entity_id))
+    if not matches:
+        return hyperedge_candidates[:top_k]
+
+    longest = max(length for length, _ in matches)
+    anchor_urls: set[str] = set()
+    for length, entity_id in matches:
+        if length != longest:
+            continue
+        payload = entity_sidecar.get(entity_id, {})
+        urls = payload.get("wikipedia_urls", []) if isinstance(payload, dict) else []
+        if isinstance(urls, list):
+            anchor_urls.update(str(url) for url in urls if url)
+    if not anchor_urls:
+        return hyperedge_candidates[:top_k]
+
+    local: list[dict[str, Any]] = []
+    global_hits: list[dict[str, Any]] = []
+    for result in hyperedge_candidates:
+        hyperedge_id = _optional_string(result.get("id"))
+        payload = hyperedge_sidecar.get(hyperedge_id, {}) if hyperedge_id else {}
+        urls = payload.get("wikipedia_urls", []) if isinstance(payload, dict) else []
+        if isinstance(urls, list) and anchor_urls.intersection(str(url) for url in urls):
+            local.append(result)
+        else:
+            global_hits.append(result)
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for result in [*local, *global_hits]:
+        key = str(result.get("id") or result.get("<knowledge>") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(result)
+        if len(merged) >= top_k:
+            break
+    return merged
 
 
 def _normalize_query_cache_text(value: Any) -> str:
