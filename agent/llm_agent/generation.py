@@ -1403,9 +1403,21 @@ class ToolGenerationManager:
         ], pad_to_left=False)
         
         effective_len = self.tensor_fn.create_attention_mask(responses).sum(dim=1).max()
-        max_len = min(self.config.max_prompt_length, effective_len)
-        
-        return {'responses': responses[:, :max_len]}
+        max_len = min(self.config.max_response_length, int(effective_len))
+        token_lists = []
+        truncated_rows = 0
+        for row in responses:
+            ids = self._row_valid_token_list(row)
+            truncated_rows += int(len(ids) > max_len)
+            token_lists.append(self._truncate_token_list_preserving_vision(ids, max_len))
+        if truncated_rows:
+            print(
+                f"TRAJECTORY_RESPONSE_TRUNCATED: rows={truncated_rows}/{responses.shape[0]} "
+                f"limit={max_len} retained=vision_spans_and_recent_text",
+                flush=True,
+            )
+        output = self._pad_token_lists(token_lists, max_len, pad_to_left=False)
+        return {'responses': output.to(responses.device)}
 
 
     def _flush_deferred_env_tools(self, envs: List[Any] = None) -> None:

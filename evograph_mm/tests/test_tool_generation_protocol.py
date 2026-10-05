@@ -4,6 +4,7 @@ import json
 import torch
 
 from agent.llm_agent.generation import ToolGenerationManager
+from agent.llm_agent.tensor_helper import TensorConfig, TensorHelper
 
 
 def manager():
@@ -16,6 +17,43 @@ def manager():
         tool_response_end="</knowledge>",
     )
     return instance
+
+
+def response_manager(response_limit=8):
+    instance = manager()
+    instance.tokenizer = SimpleNamespace(pad_token_id=0)
+    instance.config.max_prompt_length = 3
+    instance.config.max_response_length = response_limit
+    instance.tensor_fn = TensorHelper(TensorConfig(0, 3, 4, 3))
+    instance._vision_token_ids = lambda: (90, 91, 92)
+    return instance
+
+
+def test_trajectory_uses_response_budget_not_prompt_budget():
+    instance = response_manager()
+    result = instance._update_right_side(
+        {'responses': torch.tensor([[1, 2, 3, 0]])},
+        torch.tensor([[4, 5]]), torch.tensor([[6, 0]]),
+    )
+    assert result['responses'].tolist() == [[1, 2, 3, 4, 5, 6]]
+
+
+def test_overflow_retains_final_answer_and_complete_vision_span():
+    instance = response_manager(response_limit=6)
+    result = instance._update_right_side(
+        {'responses': torch.tensor([[90, 91, 92, 1, 2, 3]])},
+        torch.tensor([[4, 5]]), torch.tensor([[6]]),
+    )
+    assert result['responses'].tolist() == [[90, 91, 92, 4, 5, 6]]
+
+
+def test_response_truncation_preserves_right_padding_for_short_rows():
+    instance = response_manager(response_limit=4)
+    result = instance._update_right_side(
+        {'responses': torch.tensor([[1, 2, 3], [1, 0, 0]])},
+        torch.tensor([[4, 5], [2, 0]]), torch.tensor([[6], [0]]),
+    )
+    assert result['responses'].tolist() == [[3, 4, 5, 6], [1, 2, 0, 0]]
 
 
 def test_repairs_complete_json_with_wrong_closing_tag():
