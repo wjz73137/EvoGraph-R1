@@ -20,6 +20,7 @@ max_tool_response_length="${EVOGRAPH_MAX_TOOL_RESPONSE_LENGTH:-384}"
 max_turn_response_length="${EVOGRAPH_MAX_TURN_RESPONSE_LENGTH:-192}"
 vllm_max_model_len="${EVOGRAPH_VLLM_MAX_MODEL_LEN:-4096}"
 vllm_max_batched_tokens="${EVOGRAPH_VLLM_MAX_BATCHED_TOKENS:-4096}"
+vllm_gpu_memory_utilization="${EVOGRAPH_VLLM_GPU_MEMORY_UTILIZATION:-0.33}"
 total_training_steps="${EVOGRAPH_TOTAL_TRAINING_STEPS:-328}"
 
 if [[ "${CUDA_VISIBLE_DEVICES:-}" != "2,3" && "${CUDA_VISIBLE_DEVICES:-}" != "3,2" ]]; then
@@ -102,10 +103,10 @@ exec "$python_bin" -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
   +actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
   actor_rollout_ref.rollout.name=vllm \
-  actor_rollout_ref.rollout.sleep_level=2 \
+  actor_rollout_ref.rollout.sleep_level=1 \
   +actor_rollout_ref.rollout.micro_batch_size=1 \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.33 \
+  actor_rollout_ref.rollout.gpu_memory_utilization="$vllm_gpu_memory_utilization" \
   actor_rollout_ref.rollout.max_num_batched_tokens="$vllm_max_batched_tokens" \
   actor_rollout_ref.rollout.max_model_len="$vllm_max_model_len" \
   actor_rollout_ref.rollout.dtype=bfloat16 \

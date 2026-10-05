@@ -76,7 +76,7 @@ actor_rollout_ref:
     ignore_eos: False
     enforce_eager: True
     free_cache_engine: True
-    sleep_level: 1 # 2 discards rollout weights; FSDP resynchronizes them before each rollout
+    sleep_level: 1 # Preserve weights and positional buffers; 0.7.3 level 2 loses buffers.
     load_format: dummy_dtensor
     tensor_model_parallel_size: 2
     max_num_batched_tokens: 32768
