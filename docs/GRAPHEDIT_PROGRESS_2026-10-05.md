@@ -209,11 +209,27 @@ The immutable graph's completed report and owner both identify construction as
 `api/qwen3.7-max-2026-06-08`, not a local language-model extractor.
 
 Full retrieval services run as the user-only transient unit
-`evograph-ge-full1891-services.service`. Training is intended to run as
-`evograph-ge-full1891-train.service`, using `.ray/gf1` and physical GPUs 2/3 only.
+`evograph-ge-full1891-services.service`, started at 15:05:23 CST. Full training was
+started at 15:13:51 CST on 2026-10-05 as `evograph-ge-full1891-train.service`,
+using `.ray/gf1` and physical GPUs 2/3 only. Launch-time source commit: `fdf5cfa`.
+The real training log confirms all 1,862 training rows and 16 validation rows were
+retained by filtering, with 931 training batches. At 15:20 CST initialization had
+finished and the first batch was making tool calls; no full-stage optimizer update
+had yet been recorded. Wikipedia augmentation returned HTTP 429 for some queries.
+GPU utilization can be zero while the actor waits for CPU retrieval or external API
+responses; a zero utilization snapshot alone is not evidence of a failed process.
 These services do not depend on a terminal or chat connection staying open, but they
 are transient user units, not a reboot-persistence guarantee. No other user's units,
 GPU processes, proxy settings, drivers or system packages were changed.
+
+The read-only user timer `evograph-ge-full1891-status.timer` records status every
+30 minutes through `scripts/record_evqa_training_status.py`. Its first scheduled
+check is 15:45:32 CST; a manual check at 15:20 confirmed the training unit was
+active and that no completed-step metric existed yet. Recorded status is appended
+to `periodic_status.jsonl` in the full experiment directory. The timer does not
+restart jobs or change GPU processes. After the experiment finishes, stop this
+experiment's timer and retrieval unit to release its own background resources;
+no other user's process is a cleanup target.
 
 `run_evqa_graphedit_full_reported.sh` runs the full stage and then writes
 `completion_report.json` / `completion_report.md` under the experiment output. The
