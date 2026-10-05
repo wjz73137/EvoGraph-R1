@@ -70,6 +70,31 @@ prompt budget 2048, accumulated response budget 2560, tool-response budget 384,
 per-turn generation budget 320, vLLM model length 4096, learning rate 5e-7.
 Do not count this test as completed until optimizer metrics and checkpoint evidence exist.
 
+This first training test subsequently completed successfully (process exit 0):
+
+- One actual optimizer update, logged at step 327; final counter/checkpoint 328.
+- Four rollout trajectories from two questions, not four independent questions.
+- Training mean reward -0.625, format 0.375, F1/EM 0.25.
+- Advantage range approximately -0.707 to +0.707; gradient norm 9.6875.
+- Policy-gradient loss was numerically zero; KL loss 0.017411. A zero scalar PG loss
+  alone does not prove a zero gradient, and the update must not be portrayed as large
+  or as evidence of meaningful convergence.
+- Rollout 182.37 s, reference 17.90 s, actor update 15.41 s, checkpoint 97.01 s.
+- No successful training edit; all four trajectories called websearch.
+- Final validation F1/EM 0.5, format 0.75, mean reward 0.25, successful edits zero.
+- Final checkpoint: `train_sleep1_complete_v1/checkpoints/global_step_328`, 14 files,
+  approximately 22 GiB, under the controlled experiment root.
+- The existing checkpoint manager automatically removed the intermediate step 327
+  actor save after writing the final checkpoint; the final checkpoint is retained.
+
+A second targeted training test, `train_sleep1_edit_evidence_v1`, starts again from
+326, not from the held-out-trained smoke checkpoint. It uses temperature 0.3, response
+budget 3072, and tool-response budget 512, with the other settings unchanged. Before
+reuse, all six graph hyperedge files matched the controlled source SHA-256 exactly.
+The training launcher now persists balanced-batch-aligned tool histories and decoded
+trajectories so failed or rejected edits can be inspected, rather than inferred from
+aggregate scores. These records remain in experiment output, not Git.
+
 ## Full-stage preparation
 
 Prepared dataset:

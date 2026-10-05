@@ -1397,6 +1397,14 @@ class RayPPOTrainer(object):
                             del gen_baseline_batch, gen_baseline_output
                     # 8. Final merge
                     batch = batch.union(final_gen_batch_output)  
+                    save_train_trajectories = os.getenv(
+                        'EVOGRAPH_SAVE_TRAIN_TRAJECTORIES', 'false'
+                    ).lower() in {'1', 'true', 'yes', 'on'}
+                    if save_train_trajectories:
+                        batch.non_tensor_batch['tool_history_json'] = np.array([
+                            json.dumps(list(getattr(env, 'tool_history', []) or []), ensure_ascii=False)
+                            for env in envs
+                        ], dtype=object)
                        
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -1437,7 +1445,23 @@ class RayPPOTrainer(object):
                             batch = batch.union(reward_tensor)
 
                         # we combine with rule-based rm
-                        reward_tensor, answer_lst_f1, answer_lst_em, format_lst, _ = self.reward_fn(batch)
+                        reward_tensor, answer_lst_f1, answer_lst_em, format_lst, train_results = self.reward_fn(batch)
+                        if save_train_trajectories:
+                            records = [{
+                                'global_steps': self.global_steps,
+                                'uid': str(batch.non_tensor_batch['uid'][i]),
+                                'question': batch.non_tensor_batch['extra_info'][i]['question'],
+                                'prediction': _clean_result_prediction(result),
+                                'answer_f1_score': float(answer_lst_f1[i]),
+                                'answer_em_score': float(answer_lst_em[i]),
+                                'format_score': float(format_lst[i]),
+                                'tool_history': json.loads(batch.non_tensor_batch['tool_history_json'][i]),
+                            } for i, result in enumerate(train_results)]
+                            path = f'expr_results/{self.config.trainer.experiment_name}/train_trajectories_step{self.global_steps}.json'
+                            os.makedirs(os.path.dirname(path), exist_ok=True)
+                            with open(path, 'w') as stream:
+                                json.dump(records, stream, ensure_ascii=False, indent=2)
+                            print(f'[Save] Training trajectories saved to {path}', flush=True)
                         batch.batch['token_level_scores'] = reward_tensor
                         batch.batch['answer_f1_scores'] = torch.tensor(answer_lst_f1)
                         batch.batch['answer_em_scores'] = torch.tensor(answer_lst_em)

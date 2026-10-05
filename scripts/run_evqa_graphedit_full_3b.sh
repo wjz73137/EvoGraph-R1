@@ -96,6 +96,7 @@ export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 export TOOL_RESPONSE_IMAGE_LIMIT=1
 export ROLLOUT_REPEAT_INTERLEAVE=true
 export PRINT_SAMPLE_PROMPT=0
+export EVOGRAPH_SAVE_TRAIN_TRAJECTORIES=true
 export TOOL_USE_DEFERRED_EXECUTION=false
 export WEBSEARCH_FUZZY_ENABLED=false
 export WEBSEARCH_WIKIPEDIA_AUGMENT=true

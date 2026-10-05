@@ -22,6 +22,7 @@ vllm_max_model_len="${EVOGRAPH_VLLM_MAX_MODEL_LEN:-4096}"
 vllm_max_batched_tokens="${EVOGRAPH_VLLM_MAX_BATCHED_TOKENS:-4096}"
 vllm_gpu_memory_utilization="${EVOGRAPH_VLLM_GPU_MEMORY_UTILIZATION:-0.33}"
 total_training_steps="${EVOGRAPH_TOTAL_TRAINING_STEPS:-328}"
+rollout_temperature="${EVOGRAPH_ROLLOUT_TEMPERATURE:-1.0}"
 
 if [[ "${CUDA_VISIBLE_DEVICES:-}" != "2,3" && "${CUDA_VISIBLE_DEVICES:-}" != "3,2" ]]; then
   echo "CUDA_VISIBLE_DEVICES must select only approved physical GPUs 2 and 3." >&2
@@ -66,6 +67,7 @@ export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
 export TOOL_RESPONSE_IMAGE_LIMIT=1
 export ROLLOUT_REPEAT_INTERLEAVE=true
 export PRINT_SAMPLE_PROMPT=0
+export EVOGRAPH_SAVE_TRAIN_TRAJECTORIES=true
 export TOOL_USE_DEFERRED_EXECUTION=false
 export WEBSEARCH_FUZZY_ENABLED=false
 export WEBSEARCH_WIKIPEDIA_AUGMENT=true
@@ -113,6 +115,7 @@ exec "$python_bin" -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
   actor_rollout_ref.rollout.n=1 \
   actor_rollout_ref.rollout.n_repeat=2 \
+  actor_rollout_ref.rollout.temperature="$rollout_temperature" \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
   actor_rollout_ref.ref.fsdp_config.param_offload=true \
   trainer.critic_warmup=0 \
