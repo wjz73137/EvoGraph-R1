@@ -218,6 +218,15 @@ finished and the first batch was making tool calls; no full-stage optimizer upda
 had yet been recorded. Wikipedia augmentation returned HTTP 429 for some queries.
 GPU utilization can be zero while the actor waits for CPU retrieval or external API
 responses; a zero utilization snapshot alone is not evidence of a failed process.
+
+The first real full-stage optimizer update, logged step 327, subsequently completed:
+154.30 seconds total, 119.30 seconds rollout, 17.24 seconds reference log-probability,
+13.70 seconds actor update, gradient norm 5.375, learning rate `5e-7`, PG loss 0.35355.
+Mean reward was -0.5625, format 0.4375, F1/EM zero, and successful/verified edits zero.
+Four trajectories expanded their retrieved images with zero trimmed or dropped image
+spans. Native sleep released 7.66 GiB on the logged rank. These are evidence of a real
+update without OOM, not evidence of improved quality or learned editing. Step 327
+does not mean 327 full-stage updates: it is the first update after resuming counter 326.
 These services do not depend on a terminal or chat connection staying open, but they
 are transient user units, not a reboot-persistence guarantee. No other user's units,
 GPU processes, proxy settings, drivers or system packages were changed.
