@@ -13,6 +13,10 @@ experiment_name="${EVOGRAPH_GRAPHEDIT_EXPERIMENT_NAME:-Qwen2.5-VL-3B_E-VQA_Graph
 actor_param_offload="${EVOGRAPH_ACTOR_PARAM_OFFLOAD:-true}"
 total_training_steps="${EVOGRAPH_TOTAL_TRAINING_STEPS:-1258}"
 reset_dataloader_on_resume="${EVOGRAPH_RESET_DATALOADER_ON_RESUME:-true}"
+max_prompt_length="${EVOGRAPH_MAX_PROMPT_LENGTH:-2048}"
+max_response_length="${EVOGRAPH_MAX_RESPONSE_LENGTH:-2560}"
+max_tool_response_length="${EVOGRAPH_MAX_TOOL_RESPONSE_LENGTH:-384}"
+max_turn_response_length="${EVOGRAPH_MAX_TURN_RESPONSE_LENGTH:-320}"
 
 if [[ "${CUDA_VISIBLE_DEVICES:-}" != "2,3" && "${CUDA_VISIBLE_DEVICES:-}" != "3,2" ]]; then
   echo "CUDA_VISIBLE_DEVICES must select only approved physical GPUs 2 and 3." >&2
@@ -108,10 +112,10 @@ exec "$python_bin" -m verl.trainer.main_ppo \
   data.val_batch_size=2 \
   data.image_key=image_path \
   data.train_batch_size=2 \
-  data.max_prompt_length=1536 \
-  data.max_response_length=1024 \
-  data.max_start_length=1536 \
-  data.max_tool_response_length=384 \
+  data.max_prompt_length="$max_prompt_length" \
+  data.max_response_length="$max_response_length" \
+  data.max_start_length="$max_prompt_length" \
+  data.max_tool_response_length="$max_tool_response_length" \
   data.use_custom_tool_format_func=true \
   actor_rollout_ref.model.path="$model_path" \
   +actor_rollout_ref.model.trust_remote_code=true \
@@ -161,7 +165,7 @@ exec "$python_bin" -m verl.trainer.main_ppo \
   tool.use_batch_tool_calls=true \
   tool.force_graph_edit_verification=true \
   +tool.response_guidance=true \
-  +tool.max_turn_response_length=192 \
+  +tool.max_turn_response_length="$max_turn_response_length" \
   +data.num_workers=0 \
   +data.pin_memory=false \
   +data.persistent_workers=false \
