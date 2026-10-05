@@ -227,6 +227,16 @@ Four trajectories expanded their retrieved images with zero trimmed or dropped i
 spans. Native sleep released 7.66 GiB on the logged rank. These are evidence of a real
 update without OOM, not evidence of improved quality or learned editing. Step 327
 does not mean 327 full-stage updates: it is the first update after resuming counter 326.
+
+Inspecting that batch also exposed a retrieval-quality limitation: for the national
+park question, the exact query-image match appeared second (Tusheti National Park),
+while the first returned entity was Tianluokeng Tulou cluster. Current controller
+guidance fixes the first returned candidate as the anchor, so subsequent searches
+were grounded on the wrong entity. This is an observed single-query failure, not a
+measured corpus-wide error rate. It prevents attributing the batch's zero F1 solely
+to the 3B actor. The full run's retrieval/anchor configuration is being retained;
+changing it mid-run would mix experimental configurations. Evaluate retrieval rank
+and anchoring independently before interpreting final model quality.
 These services do not depend on a terminal or chat connection staying open, but they
 are transient user units, not a reboot-persistence guarantee. No other user's units,
 GPU processes, proxy settings, drivers or system packages were changed.
