@@ -1173,6 +1173,13 @@ class RayPPOTrainer(object):
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        # Optional evolving-KB state: tool execution is synchronous and drained
+        # here. Do not advertise a complete checkpoint before graph copies finish.
+        graph_root = os.getenv('EVOGRAPH_GRAPHEDIT_SERVICE_ROOT')
+        if graph_root:
+            from evograph_mm.kb.graph_checkpoint import save_graph_checkpoint
+            save_graph_checkpoint(local_global_step_folder, graph_root)
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir,
                                                            'latest_checkpointed_iteration.txt')

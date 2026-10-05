@@ -1,5 +1,66 @@
 # GraphEdit reproduction: evidence and handoff (2026-10-05)
 
+## Host RAM failure and step-400 recovery
+
+The first full-stage process failed at 19:13 CST with Ray's host-memory OOM,
+not a CUDA out-of-memory error: host use reached 187.75/188.48 GiB and exceeded
+the native 95% guard. Its metrics contain 104 optimizer updates (327–430), but
+only 74 updates (327–400) survived in the model/optimizer checkpoint. Final
+validation and the full-epoch checkpoint did not finish. All failed-run logs,
+metrics, graph copies and the checkpoint remain intact at
+`expr_mm/evqa_graphedit_full1891_3b_epoch1_v1`.
+
+Six independent retrieval services unnecessarily held six runtime GME models.
+The existing retriever already uses indexed image vectors for all 1,862 train
+and 16 validation rows, and BGE for text. A launcher option now selects this
+native cached-vector/BGE path without loading runtime GME. Full image-index
+coverage was checked for every row in all six copies. Four visual and four
+text queries per service (48 sampled results) were compared before/after:
+the response hashes were identical. This does not prove equality for arbitrary
+unindexed images or a future broken BGE index; those no longer have GME fallback.
+The full dataset is not covered by the small legacy fused-question cache; it
+was already using indexed image vectors before this change.
+
+Service RSS fell from approximately 41 GiB to 6.7 GiB. This restores substantial
+host-memory headroom but is not proof that worker heap growth cannot recur.
+Ray's native memory protection remains enabled. Actor parameter/optimizer
+offload, vLLM sleep level 1, model, dataset, tool policy, API backend and rewards
+were not changed. No dependency version or installed library was modified.
+
+Resume output is separate:
+`expr_mm/evqa_graphedit_full1891_3b_epoch1_resume400_v1`.
+Its journal starts with only the 74 retained updates; steps 401–430 must be
+replayed and are not double-counted. `reset_dataloader_on_resume=false` restores
+the saved position of 148 question presentations. A stateful-loader check
+reproduced indices 1288 and 68 and the exact two original step-401 questions.
+The graph mutation journals contain no accepted mutations after checkpoint400,
+and later logged successful-edit counts are zero. Failed edits have rollback
+support, explaining later file mtimes. This evidence supports the graph resume,
+but the old checkpoint had no paired graph snapshot and API cache histories are
+not rewound; this limitation is explicit in `resume_manifest.json`. The six
+resume graphs are independent, hash-verified copies, not the preserved originals.
+
+Checkpoint frequency is now 50 rather than 200 updates. An optional project-code
+hook also saves six graph copies with model/dataloader checkpoints, after
+synchronous tool calls have drained and before advancing the latest-checkpoint
+marker. These disk-backed graph snapshots avoid accumulating whole-file byte
+backups in worker RAM. They are retained separately from actor shard cleanup
+and may consume roughly 4 GiB per save, approximately 70 GiB over the remainder
+of this epoch. The resume preparer uses paired graph snapshots when available.
+
+Background units:
+
+- `evograph-ge-full1891-resume400-train.service`: full-epoch continuation.
+- `evograph-ge-full1891-cached-services.service`: six isolated CPU services.
+- `evograph-ge-full1891-resume400-status.timer`: read-only checks every 30 minutes,
+  including host MemAvailable, swap and GPU 2/3 status.
+
+Old full-run services/timer were stopped only after verifying their exact targets;
+the older read-only API on port8005 and other users' GPU0/1 jobs were left alone.
+Successful launch is not yet evidence of a completed optimizer update or epoch.
+The continuation was launched at 19:44 CST. The full unit-test suite passed
+179 tests after these recovery changes (plus two existing deprecation warnings).
+
 ## Scope and resources
 
 - Actor: `/home/data/dataset/wjz/models/Qwen2.5-VL-3B-Instruct`.

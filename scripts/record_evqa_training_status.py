@@ -11,9 +11,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--experiment', required=True)
+    parser.add_argument('--unit', default='evograph-ge-full1891-train.service')
     args = parser.parse_args()
     state = subprocess.run([
-        'systemctl', '--user', 'show', 'evograph-ge-full1891-train.service',
+        'systemctl', '--user', 'show', args.unit,
         '--property=ActiveState,SubState,ExecMainStatus',
     ], capture_output=True, text=True, timeout=10)
     latest = None
@@ -33,7 +34,13 @@ def main():
         'nvidia-smi', '-i', '2,3', '--query-gpu=index,memory.used,utilization.gpu',
         '--format=csv,noheader,nounits',
     ], capture_output=True, text=True, timeout=10)
+    memory = {}
+    for line in Path('/proc/meminfo').read_text().splitlines():
+        name, value = line.split(':', 1)
+        if name in ('MemTotal', 'MemAvailable', 'SwapTotal', 'SwapFree'):
+            memory[name + '_kib'] = int(value.split()[0])
     record = {'checked_at': datetime.now().astimezone().isoformat(),
+              'host_memory': memory,
               'unit_state': state.stdout.strip(), 'latest_training_metrics': latest,
               'gpu_2_3': gpu.stdout.strip(), 'gpu_query_exit': gpu.returncode}
     with (args.output / 'periodic_status.jsonl').open('a') as stream:

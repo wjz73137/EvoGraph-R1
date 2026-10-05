@@ -65,6 +65,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--working-dir", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8006)
+    parser.add_argument("--runtime-encoder", choices=("gme", "cached"), default="gme",
+                        help="cached uses existing image vectors and BGE; no runtime GME fallback")
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error("port must be between 1024 and 65535")
@@ -80,6 +82,7 @@ def main() -> None:
         BGE_DEVICE="cpu",
         HF_HUB_OFFLINE="1",
         TRANSFORMERS_OFFLINE="1",
+        EVOGRAPH_MM_ENABLE_RUNTIME_ENCODER="1" if args.runtime_encoder == "gme" else "0",
     )
 
     service_id = hashlib.sha256(str(target).encode()).hexdigest()[:12]
@@ -104,21 +107,24 @@ def main() -> None:
             model_path=GME,
             dataset="E-VQA",
             subset=report.get("subset"),
-            encoder_factory=lambda *a, **kw: GMEQwen2VLEncoder(
+            encoder_factory=(lambda *a, **kw: GMEQwen2VLEncoder(
                 GME,
                 batch_size=8,
-            ),
+            )) if args.runtime_encoder == "gme" else None,
             reload_interval=0,
         )
         status = app.state.mm_api.status()
         if status.get("status") != "ready":
             raise RuntimeError(f"graph-edit copy is not ready: {status.get('blockers')}")
+        if args.runtime_encoder == "cached" and not status.get("bge_graph_index", {}).get("loaded"):
+            raise RuntimeError("cached mode requires a ready BGE graph index")
         service = {
             "pid": os.getpid(),
             "host": "127.0.0.1",
             "port": args.port,
             "device": "cpu",
             "cpu_threads": 4,
+            "runtime_encoder": args.runtime_encoder,
             "read_only": False,
             "working_dir": str(target),
             "base_working_dir": metadata["base_output_dir"],

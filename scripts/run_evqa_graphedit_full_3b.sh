@@ -155,7 +155,7 @@ exec "$python_bin" -m verl.trainer.main_ppo \
   trainer.resume_mode="$checkpoint" \
   trainer.reset_dataloader_on_resume="$reset_dataloader_on_resume" \
   trainer.default_local_dir="$output_root/checkpoints" \
-  trainer.save_freq=200 \
+  trainer.save_freq="${EVOGRAPH_SAVE_FREQ:-200}" \
   trainer.test_freq=-1 \
   trainer.total_epochs=1 \
   trainer.total_training_steps="$total_training_steps" \
