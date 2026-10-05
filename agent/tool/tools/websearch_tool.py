@@ -79,6 +79,7 @@ class WebSearchTool(Tool):
                 result = self._search_with_cache(query, self._dataset_from_args(args))
             else:
                 result = self._jina_search(query)
+            result = self._evidence_or_command_error(result)
             return self._augment_with_wikipedia(query, result)
         except sqlite3.Error as e:
             error_msg = f"Websearch cache failed before Jina fallback: {str(e)}"
@@ -665,6 +666,22 @@ class WebSearchTool(Tool):
         content = completion.choices[0].message.content
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("DashScope web search returned empty content")
+        return self._evidence_or_command_error(content.strip())
+
+    @staticmethod
+    def _evidence_or_command_error(content: str) -> str:
+        """Do not present unexecuted provider commands as retrieved facts."""
+        command_lines = [line.strip() for line in content.splitlines() if line.strip()]
+        try:
+            commands = [json.loads(line) for line in command_lines]
+        except (ValueError, TypeError):
+            commands = []
+        if commands and all(
+            isinstance(item, dict) and item.get('command') == 'search'
+            for item in commands
+        ):
+            return json.dumps({'error': 'The API provider returned search commands, not retrieved evidence. '
+                                       'These commands are not factual support.'})
         return content.strip()
 
     def _extract_title_and_description(self, text: str, max_results: int) -> str:

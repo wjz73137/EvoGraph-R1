@@ -116,6 +116,20 @@ def _batch_tensor_int(batch, key, index):
     return int(value.item()) if hasattr(value, "item") else int(value)
 
 
+def _group_validation_trajectory_metrics(results, data_sources):
+    """Group accumulated per-row metrics, not tensors from only the last batch."""
+    groups = {name: {} for name in (
+        'duplicate_search_count', 'successful_graph_edit_count',
+        'verified_graph_edit_count', 'websearch_count',
+    )}
+    if len(results) != len(data_sources):
+        raise ValueError('validation result/source count mismatch')
+    for row, source in zip(results, data_sources):
+        for name, values in groups.items():
+            values.setdefault(source, []).append(int(row.get(name, 0)))
+    return groups
+
+
 def _batch_extra_info_value(non_tensor_batch, index, key):
     extra_info = _batch_context_value(non_tensor_batch, "extra_info", index)
     if isinstance(extra_info, dict):
@@ -1018,15 +1032,9 @@ class RayPPOTrainer(object):
         data_source_answer_em = {}
         data_source_format = {}
         data_source_turns = {}
-        data_source_trajectory_metrics = {
-            name: {}
-            for name in (
-                "duplicate_search_count",
-                "successful_graph_edit_count",
-                "verified_graph_edit_count",
-                "websearch_count",
-            )
-        }
+        data_source_trajectory_metrics = _group_validation_trajectory_metrics(
+            result_list, data_sources
+        )
         for i in range(reward_tensor.shape[0]):
             data_source = data_sources[i]
             if data_source not in data_source_reward:
@@ -1044,12 +1052,6 @@ class RayPPOTrainer(object):
             if data_source not in data_source_turns:
                 data_source_turns[data_source] = []
             data_source_turns[data_source].append(turns_tensor[i])
-            for name, values_by_source in data_source_trajectory_metrics.items():
-                if name not in test_batch.batch:
-                    continue
-                values_by_source.setdefault(data_source, []).append(
-                    _batch_tensor_int(test_batch.batch, name, i)
-                )
         
         metric_dict = {}
         for data_source, rewards in data_source_reward.items():

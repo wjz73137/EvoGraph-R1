@@ -489,7 +489,10 @@ class ToolGenerationManager:
             guidance = (
                 "Next required action: if the web evidence states the requested fact "
                 "specifically for the anchored entity and location, insert one short atomic "
-                "fact using tool insert and args.content. Write a plain factual sentence, "
+                "fact using tool insert and args.content. Close </think>, then output one "
+                '<tool_call>{"tool":"insert","args":{"content":"your evidence-supported factual sentence"}}</tool_call>. '
+                "Replace the example content with the real supported fact; never insert "
+                "the instruction text. Write a plain factual sentence, "
                 "not XML tags or placeholders. If an exact existing fact is contradicted, "
                 "use update or delete instead. Do not answer before the needed edit and "
                 "verification. If the source refers to a namesake or lacks the requested "

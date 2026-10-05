@@ -8,6 +8,23 @@ from agent.tool.tools.mm import MMGraphR1InsertTool
 from verl.trainer.main_ppo import compute_graph_edit_shaping
 
 
+def test_location_enrichment_preserves_distinct_model_search_intents():
+    env = SimpleNamespace(
+        tool_context={'data_source': 'E-VQA/graph_edit_targeted_smoke', 'question': 'How many stars?'},
+        tool_history=[
+            {'tool': 'kb_search', 'args': {'query': '<img>'},
+             'result': '{"results": [{"entity": "Hotel Bohema"}]}'},
+            {'tool': 'kb_search', 'args': {'query': 'Hotel Bohema stars'},
+             'result': '{"results": [{"knowledge": "Hotel Bohema is in Bydgoszcz, Poland."}]}'},
+        ],
+    )
+    first = _inject_tool_context(env, 'websearch', {'query': 'Hotel Bohema official hotel rating'})
+    second = _inject_tool_context(env, 'websearch', {'query': 'Hotel Bohema Bydgoszcz tourism board rating'})
+    assert first['query'] != second['query']
+    assert all('Bydgoszcz, Poland' in args['query'] for args in [first, second])
+    assert 'tourism board' in second['query']
+
+
 class RecordingTool(Tool):
     def __init__(self, name):
         super().__init__(

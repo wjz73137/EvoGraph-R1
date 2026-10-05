@@ -165,7 +165,8 @@ per question. Step-counter naming and actual optimizer updates must be reported 
 
 ## Verification and GitHub status
 
-After all dataset-routing and guidance repairs: `169 passed` in `evograph_mm/tests`, with two deprecation warnings;
+After dataset-routing, guidance, search-evidence and multi-batch validation repairs:
+`175 passed` in `evograph_mm/tests`, with two deprecation warnings;
 `git diff --check` passed. Test results do not replace a real GPU optimizer smoke test.
 
 Local research branch: `research/evograph-mm-graphedit`.
@@ -178,3 +179,46 @@ operation returned HTTP 403, `Resource not accessible by integration`. Repositor
 ownership and connector authorization are separate. Upload has NOT succeeded; do not
 present the local commits as published. The original `origin` still points to the
 author's `ninjaX2o/EvoGraph-R1` repository and was not overwritten.
+
+## Final preflight repairs and persistent full-stage execution
+
+The canonical smoke completed one optimizer update: training F1/EM 0.5, format 0.6875,
+mean reward -0.1625, PG loss approximately -0.7071, gradient norm 6.5. It still had
+zero successful training edits; final validation F1/EM 0.5, format 0.875, edits zero.
+This is not evidence that the edit policy has been learned. The original targeted run
+also initially failed because its Ray Unix socket path exceeded 107 bytes; the failure
+log was retained and the temporary path shortened to `.ray/gce`.
+
+Final project-code repairs before full-scale training:
+
+- Grounding a web query now retains the actor's distinct search intent instead of
+  replacing every refinement with an identical query. Angle-bracket placeholders are
+  stripped from the hint. Identical retries are still penalized.
+- Provider responses consisting only of unexecuted JSON search commands are marked
+  as non-evidence, including cached copies. A search-enable request flag alone does
+  not prove that the provider actually performed search.
+- Insert guidance again includes the concrete JSON argument shape, but no gold fact
+  or answer value. The actor still chooses the proposed content; API gating remains.
+- Multi-batch validation metrics now aggregate all saved rows. The old code indexed
+  the final two-row batch with indexes from the full validation set and would fail
+  when validating sixteen rows. Two regression tests cover cross-batch alignment.
+
+The full preflight audit was rerun and passed. The stage-1 resume source's 650 training
+rows also have zero shared image/document with the full-stage sixteen-row validation set.
+The immutable graph's completed report and owner both identify construction as
+`api/qwen3.7-max-2026-06-08`, not a local language-model extractor.
+
+Full retrieval services run as the user-only transient unit
+`evograph-ge-full1891-services.service`. Training is intended to run as
+`evograph-ge-full1891-train.service`, using `.ray/gf1` and physical GPUs 2/3 only.
+These services do not depend on a terminal or chat connection staying open, but they
+are transient user units, not a reboot-persistence guarantee. No other user's units,
+GPU processes, proxy settings, drivers or system packages were changed.
+
+`run_evqa_graphedit_full_reported.sh` runs the full stage and then writes
+`completion_report.json` / `completion_report.md` under the experiment output. The
+report requires the complete expected optimizer-step set, final validation, nonempty
+checkpoint shards, and a successful training exit. An exited process with missing
+updates is explicitly marked incomplete. A full epoch with zero edits must still be
+reported as no demonstrated edit-policy learning. Full training is a 3B/two-3090
+resource adaptation, not a claim of matching the paper's 7B/four-80GB-A100 setup.

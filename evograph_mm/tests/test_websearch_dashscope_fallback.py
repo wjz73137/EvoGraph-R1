@@ -39,6 +39,22 @@ def test_uses_dashscope_search_when_jina_key_is_absent(monkeypatch):
     assert captured["extra_body"]["enable_search"] is True
     assert captured["extra_body"]["search_options"]["forced_search"] is True
 
+    FakeCompletions.create = lambda self, **kwargs: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(
+            content='{"command":"search","query":"Entity fact"}'
+        ))]
+    )
+    result = WebSearchTool()._dashscope_search('Entity fact')
+    assert 'not retrieved evidence' in result
+
+
+def test_cached_search_commands_are_not_factual_evidence(monkeypatch):
+    monkeypatch.setenv('WEBSEARCH_WIKIPEDIA_AUGMENT', 'false')
+    tool = WebSearchTool()
+    tool.cache_enabled = True
+    monkeypatch.setattr(tool, '_search_with_cache', lambda *args: '{"command":"search","query":"Entity fact"}')
+    assert 'not retrieved evidence' in tool.execute({'query': 'Entity fact'})
+
 
 def test_optionally_augments_websearch_with_wikipedia(monkeypatch):
     tool = WebSearchTool()

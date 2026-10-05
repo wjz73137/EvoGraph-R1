@@ -276,6 +276,10 @@ def _inject_tool_context(env, tool_name: str, tool_args: Dict) -> Dict:
     if tool_name == "websearch" and "graph_edit" in str(data_source).casefold():
         enriched_query = _grounded_websearch_query(env, context)
         if enriched_query:
+            query_hint = str(contextualized_args.get('query', '')).strip()
+            query_hint = re.sub(r'\s+', ' ', re.sub(r'[<>]', ' ', query_hint)).strip()
+            if query_hint and query_hint.casefold() not in enriched_query.casefold():
+                enriched_query = f'{enriched_query} Search intent: {query_hint}'
             contextualized_args["query"] = enriched_query
     if data_source and "__data_source" not in contextualized_args:
         contextualized_args["__data_source"] = data_source
