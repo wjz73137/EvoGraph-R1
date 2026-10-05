@@ -174,11 +174,25 @@ Local commits include `92f5510` and `1121805`; later repairs may be in newer com
 `.env`, data, models, indexes, logs, and checkpoints are excluded from submission.
 
 The connected GitHub account is `wjz73137`; `wjz73137/EvoGraph-R1` exists and the
-account has repository write permission. However, the connector's actual branch-create
-operation returned HTTP 403, `Resource not accessible by integration`. Repository
-ownership and connector authorization are separate. Upload has NOT succeeded; do not
-present the local commits as published. The original `origin` still points to the
-author's `ninjaX2o/EvoGraph-R1` repository and was not overwritten.
+account has repository write permission. The plugin's actual branch-create operation
+repeatedly returned HTTP 403, `Resource not accessible by integration`. Repository
+ownership, ChatGPT approval settings, and connector authorization are separate.
+The plugin route did not upload the code.
+
+With the user's browser authorization, official GitHub CLI 2.102.0 was installed
+under `/home/wjz/tools/github-cli`, after verifying its release checksum. Terminal
+authentication succeeded as `wjz73137`, with credentials stored in the system keyring.
+A repository-local HTTPS credential helper was configured; no token was placed in
+the repository or displayed unmasked. New remote `personal` targets the user's
+`wjz73137/EvoGraph-R1` repository. Original `origin` still points to the author's
+`ninjaX2o/EvoGraph-R1` repository and was not overwritten.
+
+Terminal `git push -u personal research/evograph-mm-graphedit` succeeded, publishing
+the research branch and its local commit history. The existing remote `main` was
+not modified. Before publication, 175 tests passed again; 157 new historical file
+objects were scanned with no credential-pattern findings, sensitive credential
+paths, or files exceeding 50 MB. `.env`, models, datasets, graphs, logs and
+checkpoints were excluded. Unrelated local `Dave` was preserved and not committed.
 
 ## Final preflight repairs and persistent full-stage execution
 
