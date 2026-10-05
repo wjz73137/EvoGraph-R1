@@ -61,6 +61,15 @@ Successful launch is not yet evidence of a completed optimizer update or epoch.
 The continuation was launched at 19:44 CST. The full unit-test suite passed
 179 tests after these recovery changes (plus two existing deprecation warnings).
 
+At 19:52 CST, the journal confirmed the first resumed real update, step401:
+gradient norm 5.9375, actor update 14.47 seconds, mean reward -0.5625,
+F1 0.166667 and successful edit count zero for this batch. The combined journal
+contains 75 completed updates out of931 (74 preserved plus one new update).
+The latest durable model checkpoint is still400 until the next scheduled save;
+the new paired graph-checkpoint hook has unit-test coverage but has not yet
+executed its first scheduled full-run save. This is continuation evidence,
+not a completed full-epoch report or proof of sustained memory stability.
+
 ## Scope and resources
 
 - Actor: `/home/data/dataset/wjz/models/Qwen2.5-VL-3B-Instruct`.
