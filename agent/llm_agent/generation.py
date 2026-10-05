@@ -15,7 +15,7 @@ from copy import deepcopy
 import random
 
 from .tensor_helper import TensorHelper, TensorConfig
-from agent.tool.tool_env import ToolEnv, step, step_batch
+from agent.tool.tool_env import ToolEnv, step, step_batch, _grounded_websearch_query
 from verl import DataProto
 from verl.utils.tracking import Tracking
 from verl.utils.multimodal import pad_non_tensors, select_non_tensors
@@ -450,6 +450,12 @@ class ToolGenerationManager:
         last_call = history[-1] if history else {}
         last_tool = last_call.get("tool")
         last_args = last_call.get("args") if isinstance(last_call.get("args"), dict) else {}
+        context = getattr(env, 'tool_context', {}) or {}
+        grounded_query = _grounded_websearch_query(env, context)
+        web_example = json.dumps(
+            {'tool': 'websearch', 'args': {'query': grounded_query}},
+            ensure_ascii=False, separators=(',', ':'),
+        )
         successful_edit_seen = any(
             call.get("tool") in {"insert", "update", "delete"}
             and self._tool_result_succeeded(call.get("result"))
@@ -457,44 +463,57 @@ class ToolGenerationManager:
         )
 
         if image_response:
-            anchor = anchor_entity or "<top-ranked entity name>"
+            anchor = anchor_entity or "the top-ranked entity"
+            question = str(context.get('question', '')).strip()
+            query = f'{anchor} {question}'.strip() if question else f'{anchor} information'
+            example = json.dumps(
+                {'tool': 'kb_search', 'args': {'query': query}},
+                ensure_ascii=False, separators=(',', ':'),
+            )
             guidance = (
                 f"The required visual anchor is the first and top-ranked entity: {anchor}. "
                 "Do not substitute a lower-ranked candidate. Your next response MUST be the "
                 "required text lookup even if you think you already know the answer. Use exactly "
                 "this JSON shape with a concrete query: "
-                f'<tool_call>{{"tool":"kb_search","args":{{"query":"{anchor} <fact asked by the original question>"}}}}</tool_call>. '
+                f'<tool_call>{example}</tool_call>. '
                 "Do not answer and do not call websearch before this text KB lookup."
             )
         elif "Invalid arguments for tool 'websearch'" in tool_response:
             guidance = (
                 "Next required action: retry websearch now. Put the concrete search phrase "
-                "inside args.query, not in log or another top-level field. Use exactly: "
-                '<tool_call>{"tool":"websearch","args":{"query":"<entity name> <missing fact>"}}</tool_call>.'
+                "inside args.query, not in log or another top-level field. "
+                + (f'Use <tool_call>{web_example}</tool_call>.' if grounded_query else
+                   'Use tool websearch with args.query containing the entity, location and question.')
             )
         elif last_tool == "websearch":
             guidance = (
                 "Next required action: if the web evidence states the requested fact "
-                "specifically, insert one short atomic fact into the graph. Use exactly: "
-                '<tool_call>{"tool":"insert","args":{"content":"<entity> <relation> <verified value>."}}</tool_call>. '
-                "Do not answer before the graph edit and its verification."
+                "specifically for the anchored entity and location, insert one short atomic "
+                "fact using tool insert and args.content. Write a plain factual sentence, "
+                "not XML tags or placeholders. If an exact existing fact is contradicted, "
+                "use update or delete instead. Do not answer before the needed edit and "
+                "verification. If the source refers to a namesake or lacks the requested "
+                "fact, search again with the anchored entity and its location; do not edit "
+                "or answer from that unsupported evidence."
             )
         elif last_tool in {"insert", "update", "delete"}:
             if self._tool_result_succeeded(last_call.get("result")):
                 guidance = (
                     "Next required action: verify the successful graph edit with a text "
-                    "kb_search for the edited entity and fact. Use exactly: "
-                    '<tool_call>{"tool":"kb_search","args":{"query":"<entity name> <edited fact>"}}</tool_call>. '
+                    "kb_search for the edited entity and fact using tool kb_search and "
+                    "args.query containing the actual edited sentence, not placeholders. "
                     "Do not answer before verification."
                 )
             else:
                 if "pre-commit evidence gate" in tool_response:
                     guidance = (
                         "The pre-commit gate rejected this graph edit. Read its conflict type "
-                        "and reason, keep the top-ranked visual anchor fixed, and use only prior "
-                        "web evidence that explicitly refers to that exact entity and location. "
-                        "Retry one short atomic edit; do not reuse a namesake fact and do not "
-                        "answer before a successful edit and verification."
+                        "and reason. Do not repeat the rejected edit. For entity mismatch or "
+                        "insufficient evidence, obtain new evidence with a location-specific "
+                        "websearch, keeping the top-ranked visual anchor fixed. "
+                        + (f'Use <tool_call>{web_example}</tool_call>. ' if grounded_query else '')
+                        + "Do not reuse a namesake fact. Only edit once new evidence supports "
+                        "the exact entity and scope."
                     )
                 else:
                     guidance = (
@@ -515,8 +534,9 @@ class ToolGenerationManager:
                 "merely related context. If the exact fact is present, answer with only the "
                 "short answer span. If it is absent, the next required action is websearch "
                 "using an entity-first query that includes a distinguishing location or other "
-                "identity detail from the KB result. Use this exact shape: "
-                '<tool_call>{"tool":"websearch","args":{"query":"<entity name> <location or identity detail> <missing fact>"}}</tool_call>.'
+                "identity detail from the KB result. "
+                + (f'Use <tool_call>{web_example}</tool_call>.' if grounded_query else
+                   'Use tool websearch with args.query containing those concrete details.')
             )
         else:
             guidance = (

@@ -95,6 +95,33 @@ The training launcher now persists balanced-batch-aligned tool histories and dec
 trajectories so failed or rejected edits can be inspected, rather than inferred from
 aggregate scores. These records remain in experiment output, not Git.
 
+The second test also completed one update without OOM: gradient norm 40.5, scalar
+PG loss 0.7071, mean reward -0.0625, training F1/EM 0.5, format 0.6875. It still had
+zero successful training edits. Its final validation had raw successful-edit count
+1.5/question and verified-edit count 1.0/question, but F1/EM only 0.5 and format 0.375.
+These counters are tool-success/query-result counters, not a semantic proof that every
+mutated edge is correct; successful no-op or redundant operations can inflate them.
+
+Inspection of the saved training histories found two independent causes:
+
+1. The targeted builder labeled training `E-VQA/graphedit_targeted_smoke`, but tool
+   query enrichment and reward shaping recognize the canonical `graph_edit` marker.
+   The validation split already used that marker. Thus the two splits unintentionally
+   took different paths. The builder now uses `E-VQA/graph_edit_targeted_smoke`; a
+   launcher preflight and a regression test guard this. The official full-stage dataset
+   already had the correct marker and was not changed.
+2. The actor proposed a three-star fact about a Lithuanian namesake for the Polish
+   Hotel Bohema. The API gate correctly rejected it (entity-identity mismatch with
+   confidence 0.95–0.99), but the guidance requested repeated edits even though new
+   evidence was needed. The guidance now requests location-specific retrieval after
+   rejection, removes copyable value placeholders, and requests plain factual sentences.
+   The gate threshold remains 0.85. No gold answer was added to the prompt or query.
+
+The corrected smoke dataset is `datasets_targeted_graph_edit_v1` and its fresh graph
+copies are `isolated_canonical_smoke_v1`, both under the controlled experiment root.
+The full launcher now uses the GPU-tested response/tool budgets 3072/512; its rollout
+temperature remains 1.0, while the diagnostic test can override temperature separately.
+
 ## Full-stage preparation
 
 Prepared dataset:
@@ -138,7 +165,7 @@ per question. Step-counter naming and actual optimizer updates must be reported 
 
 ## Verification and GitHub status
 
-After the repairs: `166 passed` in `evograph_mm/tests`, with two deprecation warnings;
+After all dataset-routing and guidance repairs: `169 passed` in `evograph_mm/tests`, with two deprecation warnings;
 `git diff --check` passed. Test results do not replace a real GPU optimizer smoke test.
 
 Local research branch: `research/evograph-mm-graphedit`.

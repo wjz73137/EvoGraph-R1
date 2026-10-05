@@ -14,8 +14,8 @@ actor_param_offload="${EVOGRAPH_ACTOR_PARAM_OFFLOAD:-true}"
 total_training_steps="${EVOGRAPH_TOTAL_TRAINING_STEPS:-1258}"
 reset_dataloader_on_resume="${EVOGRAPH_RESET_DATALOADER_ON_RESUME:-true}"
 max_prompt_length="${EVOGRAPH_MAX_PROMPT_LENGTH:-2048}"
-max_response_length="${EVOGRAPH_MAX_RESPONSE_LENGTH:-2560}"
-max_tool_response_length="${EVOGRAPH_MAX_TOOL_RESPONSE_LENGTH:-384}"
+max_response_length="${EVOGRAPH_MAX_RESPONSE_LENGTH:-3072}"
+max_tool_response_length="${EVOGRAPH_MAX_TOOL_RESPONSE_LENGTH:-512}"
 max_turn_response_length="${EVOGRAPH_MAX_TURN_RESPONSE_LENGTH:-320}"
 
 if [[ "${CUDA_VISIBLE_DEVICES:-}" != "2,3" && "${CUDA_VISIBLE_DEVICES:-}" != "3,2" ]]; then

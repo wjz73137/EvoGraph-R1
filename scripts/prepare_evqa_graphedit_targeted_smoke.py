@@ -36,8 +36,8 @@ def main() -> None:
         extra["split"] = "train"
         extra["targeted_graph_edit_smoke"] = True
         row["extra_info"] = extra
-        row["data_id"] = f"E-VQA/graphedit_targeted_smoke:train:{index}:{extra['image_id']}"
-        row["data_source"] = "E-VQA/graphedit_targeted_smoke"
+        row["data_id"] = f"E-VQA/graph_edit_targeted_smoke:train:{index}:{extra['image_id']}"
+        row["data_source"] = "E-VQA/graph_edit_targeted_smoke"
         train_rows.append(row)
 
     args.output.mkdir(parents=True)

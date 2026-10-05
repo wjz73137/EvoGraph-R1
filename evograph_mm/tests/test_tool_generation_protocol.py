@@ -122,7 +122,7 @@ def test_appends_phase_specific_guidance_inside_knowledge_block():
     assert "Do not substitute" in image
     assert "Do not answer" in image
     assert "exact fact" in text
-    assert '"tool":"websearch"' in text
+    assert 'tool websearch' in text
     assert image.endswith("</knowledge>")
     assert text.endswith("</knowledge>")
 
@@ -143,10 +143,36 @@ def test_guidance_requires_insert_after_websearch_and_verification_after_edit():
             tool_history=[{"tool": "insert", "args": {"content": "fact"}, "result": '{"success":true}'}]
         ),
     )
-    assert '"tool":"insert"' in after_web
+    assert 'tool insert' in after_web
     assert "Do not answer before" in after_web
-    assert '"tool":"kb_search"' in after_edit
+    assert 'tool kb_search' in after_edit
     assert "verification" in after_edit
+
+
+def test_visual_guidance_uses_real_question_without_copyable_placeholders():
+    text = manager()._append_next_action_guidance(
+        '<knowledge>{"results": []}</knowledge>', image_response=True,
+        anchor_entity='Hotel Bohema',
+        env=SimpleNamespace(tool_context={'question': 'How many stars does this hotel have?'}, tool_history=[]),
+    )
+    assert 'Hotel Bohema How many stars does this hotel have?' in text
+    assert '<fact asked' not in text
+
+
+def test_gate_rejection_requests_new_evidence_not_repeated_bad_edit():
+    env = SimpleNamespace(tool_context={'question': 'How many stars?'}, tool_history=[
+        {'tool': 'kb_search', 'args': {'query': '<img>'}, 'result': '{"results": [{"entity": "Hotel Bohema"}]}'},
+        {'tool': 'kb_search', 'args': {'query': 'Hotel Bohema stars'},
+         'result': '{"results": [{"knowledge": "Hotel Bohema is in Bydgoszcz, Poland."}]}'},
+        {'tool': 'insert', 'args': {'content': 'Hotel Bohema has three stars.'}, 'result': '{"success": false}'},
+    ])
+    text = manager()._append_next_action_guidance(
+        '<pipeline>Graph edit rejected by pre-commit evidence gate</pipeline>',
+        image_response=False, env=env,
+    )
+    assert 'Do not repeat the rejected edit' in text
+    assert 'Bydgoszcz, Poland' in text
+    assert '"tool":"websearch"' in text
 
 
 def test_successful_insert_builds_concrete_forced_verification_call():

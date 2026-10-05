@@ -34,6 +34,18 @@ test -d "$checkpoint/actor"
 test -f "$dataset_dir/train.parquet"
 test -f "$dataset_dir/test.parquet"
 
+"$python_bin" - "$dataset_dir" <<'PY'
+import sys
+from pathlib import Path
+import pyarrow.parquet as pq
+
+for split in ('train', 'test'):
+    sources = pq.read_table(Path(sys.argv[1]) / f'{split}.parquet', columns=['data_source'])['data_source'].to_pylist()
+    if not sources or any('graph_edit' not in str(value).lower() for value in sources):
+        raise SystemExit(f'{split} data_source does not enable GraphEdit routing and reward shaping')
+print('GraphEdit data routing preflight: passed')
+PY
+
 mkdir -p "$output_root/hydra" "$output_root/checkpoints"
 
 export PYTHONPATH="$project_dir${PYTHONPATH:+:$PYTHONPATH}"
