@@ -96,6 +96,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             self.gen_random_states = None
 
     def __enter__(self):
+        from verl.utils.debug.host_memory import record_host_memory
+        record_host_memory('rollout_wakeup_start')
         log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=logger)
         params = self.module.state_dict()
         log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=logger)
@@ -118,6 +120,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         del params
         torch.cuda.empty_cache()
+        record_host_memory('rollout_wakeup_complete')
         log_gpu_memory_usage('After del state_dict and empty_cache in sharding manager', logger=logger)
 
         # TODO: offload FSDP model weights
@@ -132,6 +135,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             torch.cuda.set_rng_state(self.gen_random_states)
 
     def __exit__(self, exc_type, exc_value, traceback):
+        from verl.utils.debug.host_memory import record_host_memory
         log_gpu_memory_usage('Before vllm offload in sharding manager', logger=logger)
         # TODO(ZSL): check this
         if vllm_version in ('0.4.2', '0.5.4', '0.6.3'):
@@ -148,6 +152,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         # add empty cache after each compute
         torch.cuda.empty_cache()
+        record_host_memory('rollout_sleep_complete')
 
         # restore random states
         if self.device_mesh is not None:

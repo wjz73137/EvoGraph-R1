@@ -107,6 +107,20 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
     return auto_wrap_policy
 
 
+def _cpu_offload_non_blocking():
+    """Keep the original policy unless pageable CPU offload is explicitly selected.
+
+    PyTorch 2.5 creates pinned destinations for non-blocking CUDA-to-CPU .to().
+    Its host allocator rounds sizes up to powers of two and retains free blocks.
+    Blocking transfers avoid this additional host cache for large manual shards.
+    This does not change FSDP's native CPUOffload or vLLM's sleep allocator.
+    """
+    value = os.getenv('EVOGRAPH_FSDP_CPU_OFFLOAD_NON_BLOCKING', 'true').lower()
+    if value not in ('true', 'false'):
+        raise ValueError('EVOGRAPH_FSDP_CPU_OFFLOAD_NON_BLOCKING must be true or false')
+    return value == 'true'
+
+
 @torch.no_grad()
 def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
     assert isinstance(model, FSDP)
@@ -120,7 +134,7 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
         assert flat_param.data.data_ptr() == flat_param._local_shard.data_ptr() and \
             id(flat_param.data) != id(flat_param._local_shard) and \
             flat_param.data.size() == flat_param._local_shard.size()
-        handle.flat_param_to(torch.device("cpu"), non_blocking=True)
+        handle.flat_param_to(torch.device("cpu"), non_blocking=_cpu_offload_non_blocking())
         # the following still keeps id(._local_shard) != id(.data)
         flat_param._local_shard = flat_param.data
         assert id(flat_param._local_shard) != id(flat_param.data)
@@ -153,7 +167,7 @@ def offload_fsdp_optimizer(optimizer):
             state = optimizer.state[param]
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
-                    state[key] = value.to("cpu", non_blocking=True)
+                    state[key] = value.to("cpu", non_blocking=_cpu_offload_non_blocking())
 
 
 @torch.no_grad()

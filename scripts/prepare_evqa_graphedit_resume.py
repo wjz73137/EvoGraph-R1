@@ -33,6 +33,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--experiment', required=True)
     parser.add_argument('--step', type=int, required=True)
+    parser.add_argument('--checkpoint', type=Path,
+                        help='explicit preserved checkpoint when this run failed before its first local save')
     parser.add_argument('--copy-graphs-only', action='store_true', help='finish graph copies for an already prepared output')
     args = parser.parse_args()
     if args.copy_graphs_only:
@@ -47,7 +49,9 @@ def main():
         return
     if args.output.exists():
         raise RuntimeError('resume output already exists; refusing to overwrite it')
-    checkpoint = args.source / 'checkpoints' / f'global_step_{args.step}'
+    checkpoint = args.checkpoint or args.source / 'checkpoints' / f'global_step_{args.step}'
+    if checkpoint.name != f'global_step_{args.step}':
+        raise RuntimeError('checkpoint step does not match requested resume step')
     data = checkpoint / 'data.pt'
     for rank in (0, 1):
         for kind in ('model', 'optim', 'extra_state'):

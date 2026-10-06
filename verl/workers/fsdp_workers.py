@@ -351,6 +351,8 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         from verl.workers.actor import DataParallelPPOActor
+        from verl.utils.debug.host_memory import record_host_memory
+        record_host_memory('worker_model_init_start')
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
@@ -420,11 +422,14 @@ class ActorRolloutRefWorker(Worker):
                                                             optimizer=self.actor.actor_optimizer,
                                                             lr_scheduler=self.actor_lr_scheduler,
                                                             tokenizer=self.tokenizer)
+        record_host_memory('worker_model_init_complete')
 
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
+        from verl.utils.debug.host_memory import record_host_memory
+        record_host_memory('actor_update_start')
         data = data.to('cuda')
 
         assert self._is_actor
@@ -464,6 +469,7 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
         torch.cuda.empty_cache()
+        record_host_memory('actor_update_offloaded')
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -588,6 +594,7 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, path, del_local_after_load=False):
+        from verl.utils.debug.host_memory import record_host_memory
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -597,6 +604,7 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
+        record_host_memory('checkpoint_actor_offloaded')
 
 
 class CriticWorker(Worker):

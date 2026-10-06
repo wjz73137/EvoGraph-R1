@@ -33,9 +33,12 @@ def fixture_run(tmp_path):
     return source, output, metrics, graph
 
 
-def invoke(monkeypatch, source, output):
-    monkeypatch.setattr(sys, 'argv', ['prepare', '--source', str(source), '--output', str(output),
-                                   '--experiment', 'experiment', '--step', '328'])
+def invoke(monkeypatch, source, output, checkpoint_path=None):
+    arguments = ['prepare', '--source', str(source), '--output', str(output),
+                 '--experiment', 'experiment', '--step', '328']
+    if checkpoint_path is not None:
+        arguments += ['--checkpoint', str(checkpoint_path)]
+    monkeypatch.setattr(sys, 'argv', arguments)
     monkeypatch.setattr(resume, 'copy_graphs', lambda *args: None)
     resume.main()
 
@@ -106,4 +109,22 @@ def test_resume_refuses_corrupted_paired_snapshot(tmp_path, monkeypatch):
     (snapshot / 'train_0/kv_store_entities.json').write_text('{"corrupt": true}')
     with pytest.raises(RuntimeError, match='paired graph checkpoint hash mismatch'):
         invoke(monkeypatch, source, output)
+    assert not output.exists()
+
+
+def test_resume_can_use_preserved_external_checkpoint(tmp_path, monkeypatch):
+    source, output, _, graph = fixture_run(tmp_path)
+    paired_snapshot(source, graph)
+    external = tmp_path / 'preserved/global_step_328'
+    shutil.copytree(source / 'checkpoints/global_step_328', external)
+    invoke(monkeypatch, source, output, external)
+    report = json.loads((output / 'resume_manifest.json').read_text())
+    assert report['checkpoint'] == str(external.resolve())
+    assert report['paired_graph_checkpoint'] is True
+
+
+def test_resume_refuses_external_checkpoint_step_mismatch(tmp_path, monkeypatch):
+    source, output, _, _ = fixture_run(tmp_path)
+    with pytest.raises(RuntimeError, match='checkpoint step does not match'):
+        invoke(monkeypatch, source, output, tmp_path / 'global_step_329')
     assert not output.exists()

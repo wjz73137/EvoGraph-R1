@@ -16,6 +16,7 @@ import ray
 import os
 
 import warnings
+import gc
 
 import torch
 import torch.distributed
@@ -27,6 +28,14 @@ from verl.utils.fs import copy_to_local, is_non_local
 from transformers import PreTrainedTokenizer
 
 from .checkpoint_manager import BaseCheckpointManager
+from verl.utils.debug.host_memory import record_host_memory
+
+
+def _load_checkpoint_state(path):
+    """Use native CPU/mmap loading only when explicitly requested."""
+    if os.getenv('EVOGRAPH_CHECKPOINT_MMAP_LOAD', '').lower() in {'1', 'true', 'yes'}:
+        return torch.load(path, map_location='cpu', mmap=True, weights_only=False)
+    return torch.load(path, weights_only=False)
 
 
 class FSDPCheckpointManager(BaseCheckpointManager):
@@ -63,28 +72,25 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         local_optim_path = copy_to_local(remote_optim_path)
         local_extra_state_path = copy_to_local(remote_extra_state_path)
 
-        model_state_dict = torch.load(local_model_path)
-        optimizer_state_dict = torch.load(local_optim_path)
-        extra_state_dict = torch.load(local_extra_state_path)
-
-        if del_local_after_load:
-            try:
-                os.remove(local_model_path) if is_non_local(local_model_path) else None
-                os.remove(local_optim_path) if is_non_local(local_optim_path) else None
-                os.remove(local_extra_state_path) if is_non_local(local_extra_state_path) else None
-            except Exception as e:
-                print(
-                    f'[rank-{self.rank}]: remove local resume ckpt file after loading failed, exception {e} will be ignored'
-                )
-
-        lr_scheduler_state_dict = extra_state_dict['lr_scheduler']
-
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
         optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
+        record_host_memory('checkpoint_load_start')
         with FSDP.state_dict_type(self.model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+            model_state_dict = _load_checkpoint_state(local_model_path)
+            record_host_memory('checkpoint_model_deserialized')
             self.model.load_state_dict(model_state_dict)
+            del model_state_dict
+            gc.collect()
+            record_host_memory('checkpoint_model_applied')
             if self.optimizer is not None:
+                optimizer_state_dict = _load_checkpoint_state(local_optim_path)
+                record_host_memory('checkpoint_optimizer_deserialized')
                 self.optimizer.load_state_dict(optimizer_state_dict)
+                del optimizer_state_dict
+                gc.collect()
+                record_host_memory('checkpoint_optimizer_applied')
+        extra_state_dict = _load_checkpoint_state(local_extra_state_path)
+        lr_scheduler_state_dict = extra_state_dict['lr_scheduler']
         # recover random state
         if 'rng' in extra_state_dict:
             # 'rng' may not exist for backward compatibility
@@ -92,6 +98,17 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
         if self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
+        del extra_state_dict, lr_scheduler_state_dict
+        gc.collect()
+        record_host_memory('checkpoint_load_complete')
+
+        if del_local_after_load:
+            try:
+                for local in (local_model_path, local_optim_path, local_extra_state_path):
+                    if is_non_local(local):
+                        os.remove(local)
+            except Exception as e:
+                print(f'[rank-{self.rank}]: checkpoint cache cleanup failed: {type(e).__name__}')
 
     def save_checkpoint(self, local_path: str, global_step: int, remove_previous_ckpt=False, *args, **kwargs):
         # record the previous global step

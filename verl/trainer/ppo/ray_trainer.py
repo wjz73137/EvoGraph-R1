@@ -1147,6 +1147,8 @@ class RayPPOTrainer(object):
         self.actor_rollout_wg.init_model()
 
     def _save_checkpoint(self):
+        from verl.utils.debug.host_memory import record_host_memory
+        record_host_memory('trainer_checkpoint_start', self.global_steps)
         # path: given_path + `/global_step_{global_steps}` + `/actor`
         local_global_step_folder = os.path.join(self.config.trainer.default_local_dir,
                                                 f'global_step_{self.global_steps}')
@@ -1185,6 +1187,7 @@ class RayPPOTrainer(object):
                                                            'latest_checkpointed_iteration.txt')
         with open(local_latest_checkpointed_iteration, 'w') as f:
             f.write(str(self.global_steps))
+        record_host_memory('trainer_checkpoint_complete', self.global_steps)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == 'disable':
@@ -1287,6 +1290,7 @@ class RayPPOTrainer(object):
         """
         from verl.utils.tracking import Tracking
         from omegaconf import OmegaConf
+        from verl.utils.debug.host_memory import record_host_memory
 
         logger = Tracking(project_name=self.config.trainer.project_name,
                           experiment_name=self.config.trainer.experiment_name,
@@ -1339,6 +1343,8 @@ class RayPPOTrainer(object):
 
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+
+                record_host_memory('trainer_batch_start', self.global_steps)
 
                 metrics = {}
                 timing_raw = {}
@@ -1528,6 +1534,7 @@ class RayPPOTrainer(object):
                 logger.log(data=metrics, step=self.global_steps)
                 # record metrics
                 self.record(metric_dict=metrics, global_steps=self.global_steps)
+                record_host_memory('trainer_batch_complete', self.global_steps)
 
                 self.global_steps += 1
 
