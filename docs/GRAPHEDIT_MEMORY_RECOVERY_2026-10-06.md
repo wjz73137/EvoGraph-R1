@@ -76,6 +76,16 @@ exceeded107 bytes. No optimizer update occurred in that attempt. The Ray scratch
 paths were shortened to `/home/data/dataset/wjz/.ray/gmp2` and `gmr2`; the traceback
 is preserved in v2 train.log. No training state or graph edits existed to rewind.
 
+The corrected v2 process restored model/optimizer/RNG successfully at15:50:24.
+After actual manual CPU offload, worker RSS was42.37/42.40 GiB instead of about
+50.97 GiB each. Worker proportional shmem was15.45 GiB each instead of33.45 GiB;
+cgroup shmem stayed30.90 GiB instead of66.90 GiB. Cgroup anonymous memory rose to
+33.48 GiB because the real offloaded tensors now use ordinary pageable memory.
+Thus the net reduction is about17 GiB, not36 GiB:36 GiB is the shmem reduction
+alone. Whole-host MemAvailable was91.58–91.65 GiB at offload. The first restored
+rollout is active; no claim of20-update gate acceptance or long-run stability is
+made from these startup measurements.
+
 ## Bounded validation before full continuation
 
 Diagnostic output:
