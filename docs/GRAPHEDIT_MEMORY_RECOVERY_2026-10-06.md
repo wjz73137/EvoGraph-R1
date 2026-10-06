@@ -111,6 +111,26 @@ test only: the two-rank full-model reference/update must still run in v3. The to
 test ran only after this user's probe GPU processes exited. Additional reference
 phase records now expose its before/after memory in the real probe.
 
+V3 started at15:57:22 and completed the real two-rank update651 at16:01:14.
+Reference forward10.63 seconds, actor update29.65 seconds, grad_norm12.875.
+Reference and backward both executed successfully with manual pageable offload.
+Comparable first-post-update observations (larger of the two cgroup samples):
+
+| Probe | cgroup anon GiB | cgroup shmem GiB | anon+shmem GiB | host available GiB |
+| --- | ---: | ---: | ---: | ---: |
+| v1 CPU/mmap alone | 10.55 | 90.98 | 101.53 | 54.03 |
+| v2 pageable actor/optimizer | 29.09 | 54.98 | 84.07 | 71.12 |
+| v3 pageable actor/optimizer/reference | 34.82 | 30.98 | 65.80 | 90.24 |
+
+The cgroup comparison shows about35.7 GiB less non-file host memory after the
+first real update. Whole-host values were taken at different times and also
+include other users' workloads. Actor-update transfer time increased (v1 first
+update14.64 seconds versus v3 29.65 seconds), an intentional memory/time tradeoff.
+No20-update acceptance, final diagnostic validation, new durable checkpoint or
+completed full epoch is claimed yet. The v3 controller remains active and the
+read-only30-minute timer next fires at16:27:22. Full auto-continuation still
+depends on all previously documented gate conditions.
+
 ## Bounded validation before full continuation
 
 Diagnostic output:
