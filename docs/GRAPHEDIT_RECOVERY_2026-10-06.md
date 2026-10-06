@@ -80,3 +80,12 @@ runs every 30 minutes under `evograph-ge-full1891-resume650-status.timer`.
 The timer does not automatically recover failed training. The launcher still
 generates a completion report and requires the full metric range, final
 validation and final checkpoint before claiming success.
+
+At 12:39 CST, the first resumed optimizer update, step 651, was confirmed in
+the metric journal: actor gradient norm 12.875, actor update 13.658 seconds,
+step time 126.831 seconds, mean reward -0.375, F1 0.03125, EM 0 and successful
+edit count 0. The combined journal now contains 325/931 updates (324 retained
+plus one new update), and generation for the next batch has begun. Both GPUs
+were active at the check. This confirms backward/optimizer continuation, not
+a new successful edit, a new durable checkpoint, or completed epoch. The
+latest durable checkpoint remains 650 until the next scheduled save at 700.
