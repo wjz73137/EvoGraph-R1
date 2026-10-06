@@ -86,15 +86,41 @@ alone. Whole-host MemAvailable was91.58–91.65 GiB at offload. The first restor
 rollout is active; no claim of20-update gate acceptance or long-run stability is
 made from these startup measurements.
 
+## Reference-only native FSDP pinned buffers
+
+V2 completed real update651: grad_norm10.875, actor update29.43 seconds. Its first
+reference forward lazily initialized native FSDP CPU-offload buffers. Worker
+proportional shmem rose from15.45 GiB to27.49 GiB each; post-update cgroup
+anon+shmem reached83.59–84.07 GiB, exceeding the unchanged80 GiB acceptance bound.
+The v2 training unit was deliberately stopped; it is not a saved resume point.
+
+Versioned PyTorch `_flat_param.py` initializes pinned `_local_shard` AND a pinned
+`_cpu_grad` whenever native CPUOffload is enabled, including this forward-only
+reference policy. V3 opts into existing manual FSDP phase-boundary transfers for
+the reference via `EVOGRAPH_REF_NATIVE_CPU_OFFLOAD=false`; native reference
+offload remains the default elsewhere. The reference still uses the same model,
+BF16/FSDP weights, forward log probabilities and KL computation; it is loaded
+before reference forward and offloaded afterward and at initialization. Nothing
+is changed in installed FSDP code, no KL/reference calculation is removed, and
+the conservative memory thresholds are not increased.
+
+A real CUDA/FSDP one-rank BF16 toy reference comparison on physicalGPU2 produced
+bit-identical outputs (maximum difference0). Native offload created `_cpu_grad`;
+manual offload did not, and its CPU shard was not pinned. This verifies the small
+test only: the two-rank full-model reference/update must still run in v3. The toy
+test ran only after this user's probe GPU processes exited. Additional reference
+phase records now expose its before/after memory in the real probe.
+
 ## Bounded validation before full continuation
 
 Diagnostic output:
-`expr_mm/evqa_graphedit_full1891_3b_epoch1_memory_probe_v2`.
+`expr_mm/evqa_graphedit_full1891_3b_epoch1_memory_probe_v3`.
 The preparer retained 324 updates (327–650) and recorded 22 unsaved updates to
 replay. Six independent, hash-verified graph copies come from checkpoint650,
 not the later failed live graphs. The loader position is restored without reset.
 The actor remains Qwen2.5-VL-3B-Instruct on physical GPUs 2/3, batch2, repeats2,
-BF16 FSDP, native vLLM sleep1, pageable manual CPU offload and dataset1862/validation16.
+BF16 FSDP, native vLLM sleep1, pageable manual actor/optimizer/reference CPU offload
+and dataset1862/validation16.
 Expandable segments remain unset. The replacement API key was verified to call
 both the existing Flash and Max models; the key itself is excluded from this doc.
 
@@ -115,7 +141,7 @@ systemd or Ray protection and do not alter other users' allocations.
 
 Only if the process exits successfully and the gate accepts does the workflow
 prepare a new independent full output,
-`expr_mm/evqa_graphedit_full1891_3b_epoch1_memory_resume670_v2`, restore normal670,
+`expr_mm/evqa_graphedit_full1891_3b_epoch1_memory_resume670_v3`, restore normal670,
 verify retrieval coverage, and start continuation through the original final
 counter1258. Full-stage metrics remain contiguous327–1257, totaling931 updates.
 Full continuation also saves every10 updates, retaining only the latest actor
@@ -125,14 +151,14 @@ Any process/gate/preparation/health failure stops the workflow without silently
 restarting a failed model or claiming a completed epoch.
 
 Units use this user's systemd manager. The bounded workflow is
-`evograph-ge-full1891-memory-probe-v2-train.service`; six CPU services are
-`evograph-ge-full1891-memory-probe-v2-services.service`. After acceptance, the full
-units are `evograph-ge-full1891-memory-resume670-v2-train.service` and
-`evograph-ge-full1891-memory-resume670-v2-services.service`. Read-only status timers
+`evograph-ge-full1891-memory-probe-v3-train.service`; six CPU services are
+`evograph-ge-full1891-memory-probe-v3-services.service`. After acceptance, the full
+units are `evograph-ge-full1891-memory-resume670-v3-train.service` and
+`evograph-ge-full1891-memory-resume670-v3-services.service`. Read-only status timers
 record every30 minutes. The workflow writes `recovery_workflow.json`, the gate
 writes `memory_probe_report.json`, and the normal full reporter still requires
 final validation plus the final checkpoint before declaring completion.
 
-Full unit suite after these changes: 198 passed, two existing deprecation warnings.
+Full unit suite after these changes: 200 passed, two existing deprecation warnings.
 Actual model loading, optimizer updates, memory peaks, checkpoint saving and
 automatic continuation must still be confirmed from runtime artifacts.

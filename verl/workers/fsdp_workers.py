@@ -30,7 +30,7 @@ from verl.single_controller.base.decorator import register, Dispatch
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.fs import copy_to_local
-from verl.utils.fsdp_utils import get_fsdp_wrap_policy, init_fn, get_init_weight_context_manager
+from verl.utils.fsdp_utils import get_fsdp_wrap_policy, init_fn, get_init_weight_context_manager, get_fsdp_cpu_offload
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_model_to_cpu, load_fsdp_optimizer, \
     load_fsdp_model_to_gpu
 from verl.utils.import_utils import import_external_libs
@@ -113,6 +113,9 @@ class ActorRolloutRefWorker(Worker):
         elif self._is_ref:
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get('param_offload', False)
+
+        self._manual_ref_cpu_offload = self._is_ref and not self.config.ref.fsdp_config.get(
+            'native_cpu_offload', True)
 
         # normalize config
         if self._is_actor:
@@ -253,9 +256,9 @@ class ActorRolloutRefWorker(Worker):
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
 
         # TODO: add transformer policy
-        # We force reference policy to use CPUOffload to save memory.
-        # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
-        cpu_offload = None if role == 'actor' else CPUOffload(offload_params=True)
+        # Native reference offload stays the default. Manual offload avoids its
+        # pinned CPU gradient preallocation for a forward-only reference model.
+        cpu_offload = get_fsdp_cpu_offload(role, fsdp_config)
         actor_module_fsdp = FSDP(
             actor_module,
             cpu_offload=cpu_offload,
@@ -410,6 +413,8 @@ class ActorRolloutRefWorker(Worker):
                                                                    'trust_remote_code', False),
                                                                use_liger=self.config.model.get('use_liger', False),
                                                                role='ref')[0]
+            if self._manual_ref_cpu_offload:
+                offload_fsdp_model_to_cpu(self.ref_module_fsdp)
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
@@ -552,6 +557,11 @@ class ActorRolloutRefWorker(Worker):
     def compute_ref_log_prob(self, data: DataProto):
         assert self._is_ref
 
+        from verl.utils.debug.host_memory import record_host_memory
+        record_host_memory('reference_forward_start')
+        if self._manual_ref_cpu_offload:
+            load_fsdp_model_to_gpu(self.ref_module_fsdp)
+
         data = data.to('cuda')
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
@@ -572,7 +582,10 @@ class ActorRolloutRefWorker(Worker):
         if self.world_size > 1:
             self.ref_policy.actor_module._handle.reshard(True)
 
+        if self._manual_ref_cpu_offload:
+            offload_fsdp_model_to_cpu(self.ref_module_fsdp)
         torch.cuda.empty_cache()
+        record_host_memory('reference_forward_offloaded')
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

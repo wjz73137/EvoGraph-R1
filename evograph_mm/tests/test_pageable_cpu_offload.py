@@ -6,6 +6,17 @@ import torch
 from verl.utils import fsdp_utils
 
 
+def test_native_reference_offload_is_default_and_actor_stays_manual():
+    assert fsdp_utils.get_fsdp_cpu_offload('ref', {}).offload_params is True
+    assert fsdp_utils.get_fsdp_cpu_offload('actor', {}) is None
+
+
+def test_manual_reference_offload_requires_cpu_offload_configured():
+    assert fsdp_utils.get_fsdp_cpu_offload('ref', {'native_cpu_offload': False, 'param_offload': True}) is None
+    with pytest.raises(ValueError, match='param_offload=true'):
+        fsdp_utils.get_fsdp_cpu_offload('ref', {'native_cpu_offload': False, 'param_offload': False})
+
+
 def test_original_async_policy_is_default(monkeypatch):
     monkeypatch.delenv('EVOGRAPH_FSDP_CPU_OFFLOAD_NON_BLOCKING', raising=False)
     assert fsdp_utils._cpu_offload_non_blocking() is True

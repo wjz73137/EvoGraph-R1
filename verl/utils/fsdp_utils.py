@@ -20,7 +20,7 @@ import itertools
 import os
 from contextlib import contextmanager
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, CPUOffload
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from transformers.trainer_pt_utils import get_module_class_from_name
 import torch
@@ -105,6 +105,17 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         auto_wrap_policy = functools.partial(_or_policy, policies=policies)
 
     return auto_wrap_policy
+
+
+def get_fsdp_cpu_offload(role, config):
+    """Select native reference offload or explicit manual phase-boundary offload."""
+    if role == 'actor':
+        return None  # Native actor offload is incompatible with gradient accumulation.
+    if not config.get('native_cpu_offload', True):
+        if not config.get('param_offload', False):
+            raise ValueError('manual reference offload requires param_offload=true')
+        return None
+    return CPUOffload(offload_params=True)
 
 
 def _cpu_offload_non_blocking():

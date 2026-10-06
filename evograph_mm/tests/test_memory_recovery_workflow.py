@@ -22,6 +22,7 @@ def test_workflow_stops_on_probe_failure_without_launching_full(tmp_path, monkey
     assert len(calls) == 1
     assert calls[0][1]['env']['EVOGRAPH_CHECKPOINT_MMAP_LOAD'] == 'true'
     assert calls[0][1]['env']['EVOGRAPH_FSDP_CPU_OFFLOAD_NON_BLOCKING'] == 'false'
+    assert calls[0][1]['env']['EVOGRAPH_REF_NATIVE_CPU_OFFLOAD'] == 'false'
     assert calls[0][1]['env']['EVOGRAPH_REMOVE_PREVIOUS_CHECKPOINT'] == 'false'
     socket = calls[0][1]['env']['EVOGRAPH_RAY_TMPDIR'] + '/session_2026-10-06_15-47-24_089947_2174513/sockets/plasma_store'
     assert len(socket.encode()) <= 107

@@ -146,6 +146,7 @@ exec "$python_bin" -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.n_repeat=2 \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
   actor_rollout_ref.ref.fsdp_config.param_offload=true \
+  +actor_rollout_ref.ref.fsdp_config.native_cpu_offload="${EVOGRAPH_REF_NATIVE_CPU_OFFLOAD:-true}" \
   trainer.critic_warmup=0 \
   "trainer.logger=['console']" \
   trainer.project_name=EvoGraph-R1-MM-GraphEdit-Full1891 \

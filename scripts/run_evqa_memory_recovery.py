@@ -15,13 +15,13 @@ import urllib.request
 PROJECT = Path('/home/wjz/projects/EvoGraph-R1')
 PYTHON = '/home/data/env/wjz/evograph-r1/bin/python'
 ROOT = Path('/home/data/dataset/wjz/EvoGraph-R1/expr_mm')
-PROBE = ROOT / 'evqa_graphedit_full1891_3b_epoch1_memory_probe_v2'
-FULL = ROOT / 'evqa_graphedit_full1891_3b_epoch1_memory_resume670_v2'
+PROBE = ROOT / 'evqa_graphedit_full1891_3b_epoch1_memory_probe_v3'
+FULL = ROOT / 'evqa_graphedit_full1891_3b_epoch1_memory_resume670_v3'
 CHECKPOINT = ROOT / 'evqa_graphedit_full1891_3b_epoch1_resume400_v1/checkpoints/global_step_650'
 EXPERIMENT = 'Qwen2.5-VL-3B_E-VQA_GraphEdit_full1891_epoch1_v1'
-SERVICES = 'evograph-ge-full1891-memory-probe-v2-services.service'
-FULL_SERVICE = 'evograph-ge-full1891-memory-resume670-v2-services'
-FULL_TRAIN = 'evograph-ge-full1891-memory-resume670-v2-train'
+SERVICES = 'evograph-ge-full1891-memory-probe-v3-services.service'
+FULL_SERVICE = 'evograph-ge-full1891-memory-resume670-v3-services'
+FULL_TRAIN = 'evograph-ge-full1891-memory-resume670-v3-train'
 
 
 def run(arguments, **kwargs):
@@ -45,8 +45,9 @@ def main():
                EVOGRAPH_GRAPHEDIT_SERVICE_ROOT=str(PROBE / 'isolated_graphs'),
                EVOGRAPH_CHECKPOINT_MMAP_LOAD='true',
                EVOGRAPH_FSDP_CPU_OFFLOAD_NON_BLOCKING='false',
+               EVOGRAPH_REF_NATIVE_CPU_OFFLOAD='false',
                EVOGRAPH_MEMORY_DIAGNOSTICS_DIR=str(PROBE / 'memory_diagnostics'),
-               EVOGRAPH_RAY_TMPDIR='/home/data/dataset/wjz/.ray/gmp2')
+               EVOGRAPH_RAY_TMPDIR='/home/data/dataset/wjz/.ray/gmp3')
     state('running_20_update_probe', first_step=651, last_step=670)
     result = subprocess.run(['/bin/bash', str(PROJECT / 'scripts/run_evqa_graphedit_full_3b.sh')],
                             env=env, cwd=PROJECT)
@@ -96,12 +97,13 @@ def main():
          'EVOGRAPH_RESET_DATALOADER_ON_RESUME=false', 'EVOGRAPH_SAVE_FREQ=10',
          'EVOGRAPH_TOTAL_TRAINING_STEPS=1258', 'EVOGRAPH_CHECKPOINT_MMAP_LOAD=true',
          'EVOGRAPH_FSDP_CPU_OFFLOAD_NON_BLOCKING=false',
+         'EVOGRAPH_REF_NATIVE_CPU_OFFLOAD=false',
          'EVOGRAPH_MEMORY_DIAGNOSTICS_DIR=' + str(FULL / 'memory_diagnostics'),
          'EVOGRAPH_GRAPHEDIT_OUTPUT_ROOT=' + str(FULL),
          'EVOGRAPH_GRAPHEDIT_SERVICE_ROOT=' + str(FULL / 'isolated_graphs'),
-         'EVOGRAPH_RAY_TMPDIR=/home/data/dataset/wjz/.ray/gmr2',
+         'EVOGRAPH_RAY_TMPDIR=/home/data/dataset/wjz/.ray/gmr3',
          '/bin/bash', str(PROJECT / 'scripts/run_evqa_graphedit_full_reported.sh')])
-    run(['systemd-run', '--user', '--unit=evograph-ge-full1891-memory-resume670-v2-status',
+    run(['systemd-run', '--user', '--unit=evograph-ge-full1891-memory-resume670-v3-status',
          '--on-active=30min', '--on-unit-active=30min', '--timer-property=AccuracySec=1min',
          PYTHON, str(PROJECT / 'scripts/record_evqa_training_status.py'), '--output', str(FULL),
          '--experiment', EXPERIMENT, '--unit', FULL_TRAIN + '.service'])
