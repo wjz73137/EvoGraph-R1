@@ -1,4 +1,6 @@
+import hashlib
 import json
+import shutil
 import sys
 
 import pytest
@@ -66,5 +68,42 @@ def test_resume_refuses_unrewound_successful_edits(tmp_path, monkeypatch):
     rows[-1]['trajectory/successful_graph_edit_count/mean'] = 0.25
     metrics.write_text(''.join(json.dumps(row) + '\n' for row in rows))
     with pytest.raises(RuntimeError, match='successful graph edits after checkpoint'):
+        invoke(monkeypatch, source, output)
+    assert not output.exists()
+
+
+def paired_snapshot(source, graph):
+    snapshot = source / 'checkpoints/global_step_328/graph_state'
+    shutil.copytree(graph, snapshot / 'train_0')
+    hashes = {name: hashlib.sha256((snapshot / 'train_0' / name).read_bytes()).hexdigest()
+              for name in ('kv_store_entities.json', 'kv_store_hyperedges.json',
+                           'graph_chunk_entity_relation.graphml')}
+    (snapshot / 'manifest.json').write_text(json.dumps({'train_0': hashes}))
+    return snapshot
+
+
+def test_resume_uses_paired_snapshot_despite_later_live_edits(tmp_path, monkeypatch):
+    source, output, metrics, graph = fixture_run(tmp_path)
+    snapshot = paired_snapshot(source, graph)
+    (graph / 'hyperedge_recent_mutations.json').write_text(json.dumps({'mutations': [
+        {'timestamp': '2099-01-01T00:00:00+00:00'}]}))
+    (graph / 'kv_store_entities.json').write_text('{"new": "live edit"}')
+    rows = [json.loads(line) for line in metrics.read_text().splitlines()]
+    rows[-1]['trajectory/successful_graph_edit_count/mean'] = 0.25
+    metrics.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    invoke(monkeypatch, source, output)
+    report = json.loads((output / 'resume_manifest.json').read_text())
+    assert report['paired_graph_checkpoint'] is True
+    assert report['graph_source'] == str(snapshot.resolve())
+    assert report['graph_resume_limitation'] is None
+    assert report['graph_audit']['train_0']['mutations'] == 1
+    assert (graph / 'kv_store_entities.json').read_text() == '{"new": "live edit"}'
+
+
+def test_resume_refuses_corrupted_paired_snapshot(tmp_path, monkeypatch):
+    source, output, _, graph = fixture_run(tmp_path)
+    snapshot = paired_snapshot(source, graph)
+    (snapshot / 'train_0/kv_store_entities.json').write_text('{"corrupt": true}')
+    with pytest.raises(RuntimeError, match='paired graph checkpoint hash mismatch'):
         invoke(monkeypatch, source, output)
     assert not output.exists()
